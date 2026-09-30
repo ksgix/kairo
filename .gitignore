@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Runtime state (databases, sockets, logs)
+var/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sock
+*.log
+
+# Local configuration and credentials: never commit
+.env
+.env.*
+*.env
+*.pem
+*.key
+credentials*
+secrets*
