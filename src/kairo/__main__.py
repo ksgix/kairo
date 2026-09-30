@@ -3,6 +3,10 @@
 ``python -m kairo [--db PATH]``
     Start, run one cycle, print the resulting state, stop.
 
+``python -m kairo --situation [--db PATH]``
+    Print the situation cognition would be shown now (bounded and redacted),
+    without starting the runtime or calling any provider.
+
 ``python -m kairo --run [--db PATH] [--socket PATH] [--reassess SECONDS] [--cognition claude]``
     Operate continuously in the foreground until SIGINT (Ctrl-C), SIGTERM or
     an IPC stop request. Other local processes reach it through the Unix
@@ -25,6 +29,7 @@ from kairo.cognition import CognitionProvider
 from kairo.ipc import DEFAULT_SOCKET, IPCError, IPCServer
 from kairo.memory import Memory
 from kairo.runtime import Runtime
+from kairo.situation import build_situation, render_situation
 
 DEFAULT_DB = Path(os.environ.get("KAIRO_DB", Path.home() / ".local/share/kairo/kairo.db"))
 
@@ -34,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="memory file (SQLite)")
     parser.add_argument("--run", action="store_true",
                         help="operate continuously in the foreground until interrupted")
+    parser.add_argument("--situation", action="store_true",
+                        help="print the situation cognition would see now, then exit")
     parser.add_argument("--reassess", type=float, default=300.0, metavar="SECONDS",
                         help="with --run: how long to sleep before waking to reassess "
                              "(0 = sleep until woken; default: %(default)s)")
@@ -60,6 +67,10 @@ def main(argv: list[str] | None = None) -> int:
 
     memory = Memory(args.db)
     try:
+        if args.situation:
+            runtime = Runtime(memory, cognition=cognition, reassess_after=args.reassess or None)
+            print(render_situation(build_situation(runtime.context())))
+            return 0
         if args.run:
             return _run(memory, args.socket, args.reassess or None, cognition)
         return _once(memory, args.db, cognition)

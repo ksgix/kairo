@@ -1,15 +1,20 @@
 """Cognition: the provider-agnostic interface to whatever does the thinking.
 
 Kairo is not the model. A provider (Claude, OpenAI, Gemini, ...) receives the
-runtime's ``Context`` and returns a structured ``Decision``. The helpers here
-are shared by providers: ``render_context`` turns a Context into bounded,
-redacted JSON-able data, and ``parse_decision`` strictly turns a provider's
-JSON answer back into a Decision.
+runtime's ``Context`` and returns a structured ``Decision``.
+
+    runtime state --Runtime.context()--> Context (raw, gathered state)
+        --situation.build_situation()--> situation (structured, bounded, redacted)
+        --provider--> model --JSON--> parse_decision() --> Decision
+
+``Context`` is only a gathering of existing runtime state; it is never
+persisted. Providers show cognition the situation built from it (see
+``kairo.situation``) and turn the answer back into a Decision with
+``parse_decision``.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import math
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -17,15 +22,14 @@ from typing import Any, Protocol
 from kairo.actions import Action
 from kairo.chat import Message
 from kairo.directives import Directive
-from kairo.redact import redact
 from kairo.todo import TodoItem
-
-CONTEXT_STRING_LIMIT = 2000  # characters per string in rendered context
 
 
 @dataclass(frozen=True)
 class Context:
-    """What the runtime shows cognition at the start of a cycle."""
+    """Runtime state gathered at the start of a cycle, before any projection.
+    Record lists are the most recent ones, oldest first; ``counts`` holds the
+    total number of records of each kind, so omissions can be reported."""
 
     environment: dict[str, Any]
     directives: list[Directive]
@@ -40,6 +44,17 @@ class Context:
     runtime: dict[str, Any] = field(default_factory=dict)
     # The structured actions the runtime can execute (kind -> description/params).
     available_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Recent cycle-log records: what cognition decided (or how it failed) before.
+    recent_cycles: list[dict[str, Any]] = field(default_factory=list)
+    # Recently completed to-do items.
+    done_todo: list[TodoItem] = field(default_factory=list)
+    # Total records per kind (directive, todo, message, action, cycle, ...).
+    counts: dict[str, int] = field(default_factory=dict)
+    # The observation from the previous cycle, with "observed_at", if any.
+    previous_observation: dict[str, Any] | None = None
+    # Knowledge retrieved for this cycle. The boundary for a future knowledge
+    # store; nothing fills it yet.
+    knowledge: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -70,23 +85,6 @@ class CognitionError(Exception):
     def __init__(self, category: str, message: str) -> None:
         super().__init__(message)
         self.category = category
-
-
-# -- context for providers ---------------------------------------------------
-
-
-def render_context(context: Context) -> dict[str, Any]:
-    """The Context as plain data, bounded and with secret values redacted."""
-    data = {
-        "runtime": {**context.runtime, "wake_reason": context.wake_reason},
-        "environment": context.environment,
-        "directives": [{"id": d.id, "statement": d.statement} for d in context.directives],
-        "todo": [dataclasses.asdict(t) for t in context.todo],
-        "chat": [{"sender": m.sender, "text": m.text, "at": m.at} for m in context.messages],
-        "recent_actions": context.recent_actions,
-        "available_actions": context.available_actions,
-    }
-    return redact(data, limit=CONTEXT_STRING_LIMIT)
 
 
 # -- decisions from providers ------------------------------------------------

@@ -1,7 +1,7 @@
 """Claude as Kairo's cognition, through the locally installed Claude Code CLI.
 
 Each ``decide`` runs one headless, tool-less ``claude -p`` call: the rendered
-runtime context goes in on stdin, and the CLI's schema-validated structured
+situation (see ``kairo.situation``) goes in on stdin, and the CLI's schema-validated structured
 output comes back and is strictly parsed into a Decision. Claude has no tools
 of its own here; everything it wants done must come back as a structured
 action for the runtime to execute. Authentication is whatever the local CLI
@@ -17,46 +17,52 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kairo.cognition import (
-    CognitionError, Context, Decision, decision_schema, parse_decision, render_context,
-)
+from kairo.cognition import CognitionError, Context, Decision, decision_schema, parse_decision
+from kairo.situation import build_situation, render_situation
 
 DEFAULT_TIMEOUT = 300.0
 
 SYSTEM_PROMPT = """\
 You are the cognition of Kairo, a persistent autonomous runtime on a Linux host. \
-You are not answering a chat request. Kairo keeps running across cycles, sleeps \
-and wakes, and remembers across restarts; you are called once per cycle with its \
-current context and decide what Kairo does next.
+You are not answering a chat request, and you are not Kairo itself: Kairo is the \
+runtime, which continues across cycles, sleeps and wakes, and survives restarts. \
+You are called once per cycle with Kairo's current situation and decide what Kairo \
+does next.
 
-The context (JSON) contains: runtime (identity, lifecycle state, wake_reason, time), \
-environment (a fresh observation of the host), directives (the lasting reasons Kairo \
-operates), todo (operational notes), chat (recent messages between the human and \
-Kairo), recent_actions (what was already executed, with results and verification) \
-and available_actions (the only actions the runtime can execute, with parameter schemas).
+The situation (JSON) has these sections: kairo (identity), now (lifecycle state, \
+why Kairo is awake, previous cycle and process), environment (a fresh host \
+observation and what changed since the last one), directives (the lasting areas \
+Kairo is responsible for), todo (operational notes), history (recent cycles, \
+actions with results and verification, and chat), open_threads (loose ends the \
+runtime sees in its records; informational, not a task list), knowledge, capabilities (the only actions the runtime can \
+execute) and context (bounds and what was omitted). Each part says where it comes \
+from and how old it is.
+
+Treat runtime records and observations as facts, weighted by their age. Treat \
+earlier assessments and action purposes as your own past interpretations, not \
+facts: check them against the records. An action's state says whether it actually \
+worked; "executed_unverified" means it ran but nobody checked the outcome. \
+Missing or unknown information is really missing; never fill it in.
 
 Each cycle:
-1. Read the context. Treat it as the only source of facts; never invent observations.
-2. Consider the directives, the environment and recent action results, and decide \
-whether anything meaningful needs attention now: a problem, a risk, an opportunity, \
-or an unanswered human message.
-3. If so, request concrete actions from available_actions. The runtime executes them \
-after you answer; you see results in recent_actions on the next cycle. Nothing you \
-request has happened yet, so never claim an outcome before you have seen its result.
-4. Verification "unverifiable" means no automatic check exists: judge the outcome \
-yourself from the recorded result, or observe again with a follow-up action.
-5. If actions are in flight or you need their results, set sleep=false to get another \
-cycle right away. Otherwise set sleep=true, and use wake_after (seconds) if something \
-should be rechecked at a particular time; null uses the runtime default.
-6. Reply (replies) only when it helps the human: to answer them, or to report \
-something they should know. Be concise. Do not repeat earlier replies.
+1. Understand the situation, and whether this continues earlier work or is new.
+2. Decide what matters now, given the directives, the environment, open threads \
+and recent results: a problem, a risk, an opportunity, or an unanswered message.
+3. If something needs doing, request concrete actions from capabilities. The \
+runtime executes them after you answer; you will see their results next cycle, so \
+never claim an outcome you have not seen.
+4. If you need those results, set sleep=false for another cycle right away. \
+Otherwise set sleep=true, with wake_after (seconds) if something should be \
+rechecked at a particular time; null uses the runtime default.
+5. Reply (replies) only when it helps the human: to answer them, or to report \
+something they should know. Be concise and do not repeat earlier replies.
 
 Principles: An empty todo list does not mean nothing matters, and todo is not your \
-purpose; directives and the state of the world are. Equally, do not invent busywork: \
-when nothing is genuinely worth doing, sleep. Stay within available_actions. Never \
-output, copy or seek out secrets or credentials. Prefer actions that are safe, \
-observable and reversible, and explain each action's purpose in its reason. \
-Put a brief account of your assessment in reason.
+purpose; directives and the state of the world are. Do not invent busywork: when \
+nothing is genuinely worth doing, sleep. Stay within capabilities. Never output, \
+copy or seek out secrets or credentials. Prefer actions that are safe, observable \
+and reversible, and give each action's purpose in its reason. Put your assessment \
+in reason: what you understood, what you intend and why. The next cycle will read it.
 
 Answer only with the JSON object required by the output schema."""
 
@@ -92,7 +98,8 @@ class ClaudeCognition:
         return argv
 
     def decide(self, context: Context) -> Decision:
-        prompt = "Kairo cycle context:\n" + json.dumps(render_context(context), indent=1)
+        situation = render_situation(build_situation(context))
+        prompt = "Kairo situation:\n" + situation
         started = time.monotonic()
         try:
             proc = subprocess.run(
@@ -116,6 +123,7 @@ class ClaudeCognition:
         decision = parse_decision(_answer(envelope), context.available_actions)
         return dataclasses.replace(decision, meta={
             "seconds": seconds,
+            "situation_chars": len(situation),
             "api_seconds": _round(envelope.get("duration_api_ms"), 1000),
             "turns": envelope.get("num_turns"),
             "cost_usd": envelope.get("total_cost_usd"),

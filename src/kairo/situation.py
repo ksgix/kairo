@@ -1,0 +1,420 @@
+"""The situation model: what cognition is shown about Kairo, each cycle.
+
+    Runtime.context()      gathers raw runtime state into a Context
+    build_situation()      projects it into structured sections, derives what
+                           is still open, applies bounds, and redacts secrets
+    render_situation()     serialises it deterministically for a provider
+
+The situation is derived, never stored: the runtime's records remain the only
+source of truth. It is provider-agnostic plain data.
+
+Every section says where its content comes from ("source") and times carry an
+age relative to ``now``, so cognition can tell a fresh observation from an old
+record. States such as an action's ``state`` are derived by the runtime from
+its records. Cognition's own earlier words (cycle assessments, action reasons)
+are labelled as interpretation, never presented as fact. Missing state is
+stated as missing, not filled in.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Callable
+
+from kairo.cognition import Context
+from kairo.redact import MARKER, redact
+
+TRUNCATED = "[truncated "
+
+
+@dataclass(frozen=True)
+class Limits:
+    """Selection rules and size bounds. Lists keep the most recent items."""
+
+    directives: int = 20
+    open_todo: int = 30
+    done_todo: int = 5
+    messages: int = 20
+    actions: int = 15
+    cycles: int = 10
+    text: int = 2000           # characters per string, anywhere
+    action_output: int = 1500  # characters of stdout / stderr per action
+    assessment: int = 600      # characters of an earlier cycle's assessment
+    budget: int = 60_000       # characters of rendered JSON; oldest history goes first
+
+
+LIMITS = Limits()
+
+
+def build_situation(context: Context, limits: Limits = LIMITS) -> dict[str, Any]:
+    now = _number(context.runtime.get("now"))
+    if now is None:
+        now = time.time()
+    unavailable: list[str] = []
+
+    def section(name: str, build: Callable[[], Any]) -> Any:
+        # One malformed record must not take the whole context (or cycle) down.
+        try:
+            return build()
+        except Exception as exc:
+            unavailable.append(name)
+            return {"unavailable": f"could not be built from runtime records ({type(exc).__name__})"}
+
+    situation = {
+        "kairo": section("kairo", lambda: _kairo(context, now)),
+        "now": section("now", lambda: _now(context, now)),
+        "environment": section("environment", lambda: _environment(context, now)),
+        "directives": section("directives", lambda: _directives(context, now, limits)),
+        "todo": section("todo", lambda: _todo(context, now, limits)),
+        "history": {
+            "cycles": section("history.cycles", lambda: _cycles(context, now, limits)),
+            "actions": section("history.actions", lambda: _actions(context, now, limits)),
+            "chat": section("history.chat", lambda: _chat(context, now, limits)),
+        },
+        "open_threads": section("open_threads", lambda: _open_threads(context, now, limits)),
+        "knowledge": section("knowledge", lambda: _knowledge(context, now)),
+        "capabilities": section("capabilities", lambda: _capabilities(context)),
+    }
+
+    # Round-trip through JSON so only plain data survives. Anything else becomes
+    # its type name: an object's repr could carry a secret, so it is never used.
+    plain = json.loads(json.dumps(situation, default=lambda o: f"<{type(o).__name__}>"))
+    situation = redact(plain, limit=limits.text)
+    trimmed = _fit_budget(situation, limits.budget)
+    text = render_situation(situation)
+    situation["context"] = {
+        "times": "UTC; age_seconds is relative to now.time",
+        "limits": dataclasses.asdict(limits),
+        # Markers present in what cognition sees, whether applied now or when stored.
+        "redaction_markers": text.count(MARKER),
+        "truncated_strings": text.count(TRUNCATED),
+        "trimmed_for_budget": trimmed,
+        "unavailable_sections": unavailable,
+        # Record types the runtime could not read this cycle (shown as empty above).
+        "unreadable_records": list(context.runtime.get("unreadable_records") or []),
+    }
+    return situation
+
+
+def render_situation(situation: dict[str, Any]) -> str:
+    """Deterministic text form of a situation, for providers and inspection."""
+    return json.dumps(situation, indent=1, ensure_ascii=False)
+
+
+# -- sections ----------------------------------------------------------------
+
+
+def _kairo(ctx: Context, now: float) -> dict[str, Any]:
+    r = ctx.runtime
+    return {
+        "what": ("Kairo Runtime: a persistent autonomous runtime on this host. It continues "
+                 "across cycles, sleeps and wakes, and survives restarts. Cognition is invoked "
+                 "once per cycle to decide what Kairo does next; the runtime owns state, "
+                 "execution, verification and persistence."),
+        "identity": r.get("identity"),
+        "born": _when(r.get("born_at"), now),
+        "starts": r.get("starts"),
+    }
+
+
+def _now(ctx: Context, now: float) -> dict[str, Any]:
+    r = ctx.runtime
+    previous = r.get("previous_process")
+    if isinstance(previous, dict):
+        # The recorded reason is left out: for a sleeping state it is cognition's
+        # own words, which history.cycles already shows labelled as such.
+        previous_process = {
+            "last_recorded_state": previous.get("state"),
+            "last_recorded": _when(previous.get("at"), now),
+            "ended_cleanly": previous.get("state") == "stopped",
+        }
+    else:
+        previous_process = None  # this is the first process of this Kairo
+    last = _last(ctx.recent_cycles)
+    started = r.get("process_started_at")
+    return {
+        "time": _iso(now),
+        "lifecycle_state": r.get("state"),
+        "wake_reason": ctx.wake_reason or None,
+        "in_state_since": _when(r.get("state_since"), now),
+        "process": None if started is None else {  # None: this process has not started
+            "started": _when(started, now),
+            "cycles_completed": r.get("cycles_this_process"),
+        },
+        "previous_process": previous_process,
+        "previous_cycle": None if last is None else {
+            "ended": _when(last.get("at"), now),
+            "ended_in_state": last.get("state"),
+        },
+        "default_reassess_after_seconds": r.get("default_reassess_after"),
+    }
+
+
+def _environment(ctx: Context, now: float) -> dict[str, Any]:
+    observed = {
+        "source": "runtime observation taken at the start of this cycle",
+        **_when(now, now),
+        "facts": ctx.environment or None,
+    }
+    if not ctx.environment:
+        observed["unavailable"] = ctx.runtime.get("observation_error") or "no observation"
+    prev = ctx.previous_observation
+    if isinstance(prev, dict) and isinstance(prev.get("observation"), dict):
+        before = prev["observation"]
+        changed = {k: {"before": before.get(k), "now": v}
+                   for k, v in (ctx.environment or {}).items() if before.get(k) != v}
+        comparison: Any = {"previous_observation": _when(prev.get("observed_at"), now),
+                           "changed": changed}
+    else:
+        comparison = None  # no earlier observation recorded
+    observed["since_previous_observation"] = comparison
+    observed["scope"] = ("Only these basic host facts are observed automatically. Anything "
+                         "else is known only through actions, whose results (with their own "
+                         "times) are in history.actions.")
+    return observed
+
+
+def _directives(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    open_by_directive: dict[str, int] = {}
+    for item in ctx.todo:
+        if item.directive_id:
+            open_by_directive[item.directive_id] = open_by_directive.get(item.directive_id, 0) + 1
+    shown = ctx.directives[-limits.directives:]
+    total = ctx.counts.get("directive")
+    return {
+        "source": "runtime records, set by the operator",
+        "meaning": ("Persistent areas of responsibility Kairo pursues over time, not tasks to "
+                    "finish. There may be several, and they can change."),
+        "active": [{
+            "id": d.id,
+            "statement": d.statement,
+            "since": _when(d.created_at, now),
+            "open_todo_items": open_by_directive.get(d.id, 0),
+        } for d in shown],
+        "active_omitted": len(ctx.directives) - len(shown),
+        "inactive": None if total is None else max(total - len(ctx.directives), 0),
+    }
+
+
+def _todo(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    shown = ctx.todo[-limits.open_todo:]
+    done = ctx.done_todo[-limits.done_todo:]
+    return {
+        "source": "runtime records, currently maintained by the operator (no action changes them)",
+        "meaning": ("Operational notes about concrete intermediate work. Not Kairo's purpose: "
+                    "an empty list does not mean nothing matters, and work worth doing need not "
+                    "be listed here."),
+        "open": [_todo_item(t, now) for t in shown],
+        "open_omitted": len(ctx.todo) - len(shown),
+        "recently_done": [{**_todo_item(t, now), "done": _when(t.done_at, now)} for t in done],
+    }
+
+
+def _todo_item(t: Any, now: float) -> dict[str, Any]:
+    return {"id": t.id, "description": t.description, "directive_id": t.directive_id,
+            "created": _when(t.created_at, now)}
+
+
+def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    items = []
+    for rec in ctx.recent_cycles[-limits.cycles:]:
+        cog = rec.get("cognition") or {}
+        item: dict[str, Any] = {
+            "ended": _when(rec.get("at"), now),
+            "wake_reason": rec.get("wake_reason"),
+            "cognition": cog.get("result"),
+            "ended_in_state": rec.get("state"),
+        }
+        if cog.get("result") == "failed":
+            item["failure"] = cog.get("failure")
+            item["failure_detail"] = rec.get("note")  # written by the runtime: a fact
+        elif cog.get("result") == "decided":
+            item["requested_actions"] = [a.get("id") for a in rec.get("actions") or []]
+            item["replies"] = cog.get("replies")
+            item["chose_sleep"] = cog.get("sleep")
+            item["wake_after_seconds"] = cog.get("wake_after")
+            item["assessment"] = _cap(rec.get("note"), limits.assessment)
+        items.append(item)
+    return {
+        "source": "runtime cycle log",
+        "note": ("'assessment' is cognition's own earlier interpretation, recorded verbatim; "
+                 "it is not verified fact. 'failure_detail' is recorded by the runtime."),
+        "items": items,
+        "omitted_older": _omitted(ctx.counts.get("cycle"), len(items)),
+    }
+
+
+def action_state(record: dict[str, Any]) -> str:
+    """The runtime's own verdict on an action record."""
+    status = record.get("status")
+    if status == "interrupted":
+        return "interrupted"
+    if status == "started":
+        return "in_progress"
+    if not (record.get("result") or {}).get("executed"):
+        return "failed_to_execute"
+    outcome = (record.get("verification") or {}).get("outcome")
+    return {"success": "verified_successful",
+            "failure": "verified_failed"}.get(outcome, "executed_unverified")
+
+
+def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    items = []
+    for rec in ctx.recent_actions[-limits.actions:]:
+        result = rec.get("result") or {}
+        output = result.get("output") or {}
+        verification = rec.get("verification") or {}
+        items.append({
+            "id": rec.get("id"),
+            "kind": rec.get("kind"),
+            "params": rec.get("params"),
+            "purpose": rec.get("reason"),
+            "requested": _when(rec.get("started_at"), now),
+            "finished": _when(rec.get("finished_at"), now) if rec.get("finished_at") else None,
+            "state": action_state(rec),
+            "returncode": output.get("returncode"),
+            "stdout": _cap(output.get("stdout"), limits.action_output),
+            "stderr": _cap(output.get("stderr"), limits.action_output),
+            "error": result.get("error"),
+            "verification": {"outcome": verification.get("outcome"),
+                             "detail": verification.get("detail")} if verification else None,
+        })
+    return {
+        "source": "runtime action log",
+        "note": ("'state' is derived by the runtime: verified_successful, verified_failed, "
+                 "executed_unverified (ran; outcome not checked), failed_to_execute, "
+                 "interrupted (cut off by a process exit; not re-run) or in_progress. "
+                 "'purpose' is cognition's stated intent when requesting it."),
+        "items": items,
+        "omitted_older": _omitted(ctx.counts.get("action"), len(items)),
+    }
+
+
+def _chat(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    items = [{**_when(m.at, now), "id": m.id, "from": m.sender, "text": m.text}
+             for m in ctx.messages[-limits.messages:]]
+    return {
+        "source": "chat log between the human operator and Kairo",
+        "note": ("Messages from 'kairo' were written by cognition in earlier cycles: claims "
+                 "made then, not verified fact."),
+        "items": items,
+        "omitted_older": _omitted(ctx.counts.get("message"), len(items)),
+    }
+
+
+def _open_threads(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    unanswered = []
+    for m in ctx.messages[-limits.messages:]:
+        if m.sender == "kairo":
+            unanswered = []
+        else:
+            unanswered.append({"id": m.id, **_when(m.at, now)})
+    attention = [{"id": rec.get("id"), "state": state}
+                 for rec in ctx.recent_actions[-limits.actions:]
+                 if (state := action_state(rec)) in
+                 ("failed_to_execute", "verified_failed", "interrupted", "in_progress")]
+    last = _last(ctx.recent_cycles)
+    last_cog = (last or {}).get("cognition") or {}
+    return {
+        "source": "derived by the runtime from the records in this context",
+        "meaning": ("Loose ends visible in the records. Informational, not a task list and not "
+                    "a source of purpose: decide yourself whether each matters. Important "
+                    "matters may exist that do not appear here."),
+        # Human messages after Kairo's most recent message (within the chat shown).
+        "unanswered_human_messages": unanswered,
+        "actions_failed_or_interrupted": attention,
+        # Actions the previous cycle requested: their results are new since that decision.
+        "new_action_results": [a.get("id") for a in (last or {}).get("actions") or []],
+        "previous_cycle_failed": {"failure": last_cog.get("failure"),
+                                  "ended": _when(last.get("at"), now)}
+        if last is not None and last_cog.get("result") == "failed" else None,
+        "open_todo_items": len(ctx.todo),
+    }
+
+
+def _knowledge(ctx: Context, now: float) -> dict[str, Any]:
+    if not ctx.knowledge:
+        return {
+            "source": "none",
+            "items": [],
+            "note": ("Kairo has no separate knowledge store yet. Everything it remembers "
+                     "persistently is in the directives, todo, history and open_threads "
+                     "sections."),
+        }
+    return {"source": "runtime knowledge retrieval", "items": ctx.knowledge}
+
+
+def _capabilities(ctx: Context) -> dict[str, Any]:
+    verified = set(ctx.runtime.get("verifiers") or [])
+    return {
+        "source": "runtime",
+        "meaning": ("The only operations the runtime can execute. Cognition cannot act directly: "
+                    "it requests actions in its decision, the runtime executes and records them, "
+                    "and their results appear in history.actions on the next cycle."),
+        "actions": {kind: {**spec, "verified_automatically": kind in verified}
+                    for kind, spec in ctx.available_actions.items()},
+        "verification": ("Actions without an automatic verifier are recorded with outcome "
+                         "'unverifiable' even when they ran; judge the outcome from the recorded "
+                         "result or observe again."),
+    }
+
+
+# -- helpers -----------------------------------------------------------------
+
+
+def _fit_budget(situation: dict[str, Any], budget: int) -> int:
+    """Drop the oldest history item (across actions, chat and cycles) until the
+    rendering fits the budget, so the newest of every kind survive longest."""
+    history = situation["history"]
+    lists = [history[k] for k in ("actions", "chat", "cycles")
+             if isinstance(history[k], dict) and isinstance(history[k].get("items"), list)]
+    dropped = 0
+    while len(render_situation(situation)) > budget and any(h["items"] for h in lists):
+        # Each list is oldest first; items without a known time go first.
+        oldest = max((h for h in lists if h["items"]), key=lambda h: _item_age(h["items"][0]))
+        oldest["items"].pop(0)
+        oldest["omitted_older"] = (oldest.get("omitted_older") or 0) + 1
+        dropped += 1
+    return dropped
+
+
+def _item_age(item: Any) -> float:
+    when = item.get("ended") or item.get("requested") or item if isinstance(item, dict) else {}
+    age = when.get("age_seconds") if isinstance(when, dict) else None
+    return float("inf") if age is None else age
+
+
+def _number(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _when(t: Any, now: float) -> dict[str, Any]:
+    """{"at", "age_seconds"}, or explicitly unknown when the runtime has no time."""
+    t = _number(t)
+    if t is None:
+        return {"at": "unknown"}
+    if t > now + 1:  # a clock change: no honest age exists
+        return {"at": _iso(t), "age_seconds": None, "note": "recorded later than now (clock change?)"}
+    return {"at": _iso(t), "age_seconds": max(round(now - t), 0)}
+
+
+def _cap(text: Any, limit: int) -> Any:
+    if isinstance(text, str) and len(text) > limit:
+        return f"{text[:limit]}… {TRUNCATED}{len(text) - limit} chars]"
+    return text
+
+
+def _omitted(total: int | None, shown: int) -> int | None:
+    return None if total is None else max(total - shown, 0)
+
+
+def _last(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return records[-1] if records and isinstance(records[-1], dict) else None

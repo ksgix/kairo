@@ -6,6 +6,7 @@ improve the 1C environment"), not a task that gets completed.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 
@@ -17,6 +18,8 @@ class Directive:
     statement: str
     active: bool = True
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # None for records written before timestamps existed: unknown, not invented.
+    created_at: float | None = None
 
 
 class Directives(Collection[Directive]):
@@ -24,7 +27,7 @@ class Directives(Collection[Directive]):
         super().__init__(memory, "directive", Directive)
 
     def add(self, statement: str) -> Directive:
-        return self.save(Directive(statement))
+        return self.save(Directive(statement, created_at=time.time()))
 
     def set_active(self, id: str, active: bool) -> Directive:
         directive = self.get(id)

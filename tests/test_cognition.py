@@ -19,10 +19,11 @@ from unittest import mock
 from kairo import Action, Memory, Runtime, State
 from kairo.claude import SYSTEM_PROMPT, ClaudeCognition
 from kairo.cognition import (
-    CognitionError, Context, Decision, decision_schema, parse_decision, render_context,
+    CognitionError, Context, Decision, decision_schema, parse_decision,
 )
 from kairo.environment import ACTIONS
 from kairo.redact import MARKER
+from kairo.situation import build_situation
 from test_continuous import SRC, TIMEOUT
 
 FAKE_CLAUDE = r'''#!{python}
@@ -161,11 +162,11 @@ class RenderContextTest(unittest.TestCase):
                 recent_actions=[{"id": "a", "result": {"output": {
                     "stdout": f"SOME_API_KEY={secret}\n" + "x" * 5000}}}],
                 available_actions=ACTIONS)
-            text = json.dumps(render_context(ctx))
+            text = json.dumps(build_situation(ctx))
         self.assertNotIn(secret, text)
         self.assertIn(MARKER, text)
         self.assertIn("truncated", text)
-        self.assertLess(len(text), 4000)
+        self.assertLess(len(text), 12000)
 
 
 class ClaudeProviderTest(CognitionCase):
@@ -195,7 +196,7 @@ class ClaudeProviderTest(CognitionCase):
         self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1]),
                          decision_schema(ACTIONS))
         # The context travels on stdin, not in the process list.
-        self.assertTrue(call["stdin"].startswith("Kairo cycle context:"))
+        self.assertTrue(call["stdin"].startswith("Kairo situation:"))
         self.assertNotIn("hostname", " ".join(argv))
 
     def test_result_text_fallback(self):
@@ -272,18 +273,20 @@ class ClaudeInRuntimeTest(CognitionCase):
         runtime.act(Action("process.run", {"argv": ["echo", "earlier"]}, reason="probe"))
         runtime.cycle()
 
-        context = json.loads(self.fake.calls()[0]["stdin"].split("\n", 1)[1])
-        self.assertEqual(context["runtime"]["identity"], runtime.identity["id"])
-        self.assertEqual(context["runtime"]["state"], "awake")
-        self.assertEqual(context["runtime"]["wake_reason"], "first start")
-        self.assertIn("hostname", context["environment"])
-        self.assertEqual(context["directives"], [{"id": d.id, "statement": "Keep the host healthy."}])
-        self.assertEqual(context["todo"][0]["description"], "check backups")
-        self.assertEqual(context["chat"][0]["text"], "anything wrong?")
-        [earlier] = context["recent_actions"]
-        self.assertEqual(earlier["result"]["output"]["stdout"], "earlier\n")
+        situation = json.loads(self.fake.calls()[0]["stdin"].split("\n", 1)[1])
+        self.assertEqual(situation["kairo"]["identity"], runtime.identity["id"])
+        self.assertEqual(situation["now"]["lifecycle_state"], "awake")
+        self.assertEqual(situation["now"]["wake_reason"], "first start")
+        self.assertIn("hostname", situation["environment"]["facts"])
+        [directive] = situation["directives"]["active"]
+        self.assertEqual((directive["id"], directive["statement"]), (d.id, "Keep the host healthy."))
+        self.assertEqual(situation["todo"]["open"][0]["description"], "check backups")
+        self.assertEqual(situation["history"]["chat"]["items"][0]["text"], "anything wrong?")
+        [earlier] = situation["history"]["actions"]["items"]
+        self.assertEqual(earlier["stdout"], "earlier\n")
         self.assertEqual(earlier["verification"]["outcome"], "unverifiable")
-        self.assertIn("process.run", context["available_actions"])
+        self.assertEqual(earlier["state"], "executed_unverified")
+        self.assertIn("process.run", situation["capabilities"]["actions"])
 
     def test_valid_action_is_executed_by_runtime(self):
         marker = self.dir / "marker"

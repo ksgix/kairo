@@ -28,13 +28,12 @@ from kairo.directives import Directives
 from kairo.environment import Environment
 from kairo.memory import Memory
 from kairo.redact import redact
+from kairo.situation import LIMITS
 from kairo.todo import Todo
 from kairo.verification import Outcome, Verification, Verifier, verify
 
 log = logging.getLogger("kairo")
 
-CONTEXT_MESSAGES = 20
-CONTEXT_ACTIONS = 20
 STORED_STRING_LIMIT = 16_000  # characters per string in persisted action records
 
 
@@ -87,12 +86,12 @@ class Runtime:
         self.state = State.CREATED
         self.reason = ""
         # What the previous process left behind, if anything.
-        self.previous: dict[str, Any] | None = memory.get("runtime", "lifecycle")
-        self.identity: dict[str, Any] = memory.get("runtime", "identity") or {
-            "id": uuid.uuid4().hex,
-            "born_at": time.time(),
-            "starts": 0,
-        }
+        previous = memory.get("runtime", "lifecycle")
+        self.previous: dict[str, Any] | None = previous if isinstance(previous, dict) else None
+        identity = memory.get("runtime", "identity")
+        if not isinstance(identity, dict) or not identity.get("id"):
+            identity = {"id": uuid.uuid4().hex, "born_at": time.time(), "starts": 0}
+        self.identity: dict[str, Any] = identity
 
         # All lifecycle state changes happen under this condition, and every
         # change notifies it, so any thread can wait for or cause a transition.
@@ -102,6 +101,9 @@ class Runtime:
         self._wake_pending: str | None = None
         self._wake_deadline: float | None = None  # time.monotonic() value
         self._wake_at: float | None = None  # the same deadline as wall-clock time
+        self._since: float | None = None  # when the current state began
+        self._process_started_at: float | None = None
+        self._cycles = 0  # cycles completed by this process
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -109,8 +111,11 @@ class Runtime:
         with self._cond:
             if self.state not in (State.CREATED, State.STOPPED):
                 raise LifecycleError(f"cannot go from {self.state} to {State.AWAKE}")
+            if self._process_started_at is None:
+                self._process_started_at = time.time()
             self._transition({self.state}, State.AWAKE, self._start_reason())
-            self.identity["starts"] += 1
+            starts = self.identity.get("starts")
+            self.identity["starts"] = (starts if isinstance(starts, int) else 0) + 1
             self.memory.put("runtime", "identity", self.identity)
             self._recover_interrupted_actions()
 
@@ -129,10 +134,10 @@ class Runtime:
         # previous process. They are marked, never re-executed: whether to try
         # again is a decision for cognition, with the world re-observed.
         for record in self.memory.all("action"):
-            if record["status"] == "started":
+            if isinstance(record, dict) and record.get("status") == "started" and record.get("id"):
                 record["status"] = "interrupted"
                 self.memory.put("action", record["id"], record)
-                log.warning("action %s (%s) was interrupted", record["id"], record["kind"])
+                log.warning("action %s (%s) was interrupted", record["id"], record.get("kind"))
 
     def stop(self) -> None:
         """Stop the runtime. If ``run_forever`` is active this only requests
@@ -182,6 +187,7 @@ class Runtime:
                 raise LifecycleError(f"cannot go from {self.state} to {to}")
             self.state = to
             self.reason = reason
+            self._since = time.time()
             self.memory.put(
                 "runtime", "lifecycle",
                 {"state": to, "reason": reason, "at": time.time(), **extra},
@@ -200,8 +206,8 @@ class Runtime:
             snapshot = {
                 "state": self.state,
                 "reason": self.reason,
-                "identity": self.identity["id"],
-                "starts": self.identity["starts"],
+                "identity": self.identity.get("id"),
+                "starts": self.identity.get("starts"),
                 "running": self._running,
                 "wake_at": self._wake_at if self.state is State.SLEEPING else None,
             }
@@ -263,25 +269,59 @@ class Runtime:
     # -- cycle -------------------------------------------------------------
 
     def context(self) -> Context:
+        """Gather the runtime state cognition's situation is built from. Only
+        reads existing records; nothing here is persisted."""
+        now = time.time()
         with self._cond:
-            runtime = {
-                "identity": self.identity["id"],
-                "born_at": self.identity["born_at"],
-                "starts": self.identity["starts"],
+            runtime: dict[str, Any] = {
+                "identity": self.identity.get("id"),
+                "born_at": self.identity.get("born_at"),  # None if never recorded
+                "starts": self.identity.get("starts"),
                 "state": self.state,
-                "now": time.time(),
+                "now": now,
+                "state_since": self._since,
+                "process_started_at": self._process_started_at,
+                "cycles_this_process": self._cycles,
+                "previous_process": self.previous,
                 "default_reassess_after": self.reassess_after,
+                "verifiers": sorted(self.verifiers),
             }
-        return Context(
-            environment=self.environment.observe(),
-            directives=self.directives.active(),
-            todo=self.todo.open(),
-            messages=self.chat.recent(CONTEXT_MESSAGES),
+        try:
+            observation = self.environment.observe()
+        except Exception as exc:  # an unobservable host is a fact to report, not a crash
+            log.warning("environment observation failed: %r", exc)
+            observation = {}
+            runtime["observation_error"] = f"observation failed: {type(exc).__name__}"
+        unreadable: list[str] = []
+
+        def read(name: str, fn: Any, default: Any) -> Any:
+            # A corrupt record must not stop the cycle; the gap is reported instead.
+            try:
+                return fn()
+            except Exception as exc:
+                log.warning("could not read %s for context: %r", name, exc)
+                unreadable.append(name)
+                return default
+
+        context = Context(
+            environment=observation,
+            directives=read("directives", self.directives.active, []),
+            todo=read("todo", self.todo.open, []),
+            messages=read("chat", lambda: self.chat.recent(LIMITS.messages), []),
             wake_reason=self.reason,
-            recent_actions=self.memory.recent("action", CONTEXT_ACTIONS),
+            recent_actions=read("actions",
+                                lambda: self.memory.recent("action", LIMITS.actions), []),
             runtime=runtime,
             available_actions=self.environment.actions(),
+            recent_cycles=read("cycles", lambda: self.memory.recent("cycle", LIMITS.cycles), []),
+            done_todo=read("done_todo", lambda: sorted(
+                self.todo.done(), key=lambda t: t.done_at or 0)[-LIMITS.done_todo:], []),
+            counts={kind: self.memory.count(kind)
+                    for kind in ("directive", "todo", "message", "action", "cycle")},
+            previous_observation=self.memory.get("runtime", "last_cycle"),
         )
+        runtime["unreadable_records"] = unreadable
+        return context
 
     def cycle(self) -> CycleReport:
         with self._cond:
@@ -305,8 +345,10 @@ class Runtime:
         # runtime asleep also sees the cycle that led there. One small record per
         # cycle (the cognition log), plus the latest cycle with its observation.
         self.memory.put("cycle", uuid.uuid4().hex, redact(summary, limit=1000))
-        self.memory.put("runtime", "last_cycle",
-                        redact({**summary, "observation": context.environment}, limit=1000))
+        self.memory.put("runtime", "last_cycle", redact({
+            **summary, "observation": context.environment,
+            "observed_at": context.runtime["now"]}, limit=1000))
+        self._cycles += 1
         if sleep_reason is not None:
             self.sleep(sleep_reason, wake_after)
         return CycleReport(self.state, steps, note=note, cognition=cognition)

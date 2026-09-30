@@ -15,7 +15,8 @@ orchestrator, a task manager or a project manager.
 |---|---|
 | `runtime.py` | `Runtime`: lifecycle states `created → awake ⇄ sleeping → stopped`; `cycle()` (observe → ask cognition → execute → verify → persist → maybe sleep) and `run_forever()` (continuous operation) |
 | `environment.py` | `Environment`: `observe()` describes the host; `execute(Action)` runs structured actions (currently only `process.run` with an `argv` list, never shell text) |
-| `cognition.py` | `CognitionProvider` protocol: `decide(Context) -> Decision`, plus shared helpers: bounded and redacted context rendering, the decision JSON schema, and strict decision parsing |
+| `cognition.py` | `CognitionProvider` protocol: `decide(Context) -> Decision`; `Context` (the runtime state gathered each cycle); the decision JSON schema and strict decision parsing |
+| `situation.py` | The situation model: projects a `Context` into what cognition is shown (structured, bounded, redacted and deterministic) |
 | `claude.py` | `ClaudeCognition`: the first real provider, which calls the locally installed Claude Code CLI |
 | `redact.py` | Removes secret environment values and caps oversized strings before anything is persisted or sent to cognition |
 | `actions.py` | `Action` (what was decided) and `ActionResult` (whether execution completed) |
@@ -47,11 +48,35 @@ Without a cognition provider, Kairo observes, sleeps with the reason `no cogniti
 
 `--cognition claude` makes the local `claude` CLI Kairo's cognition. Each cycle is one headless call: `claude -p` with `--tools ""` (no tools), `--restricted`, `--strict-mcp-config` and `--no-session-persistence`.
 
-- **Input:** the runtime context, sent on stdin. It includes identity and lifecycle state, the wake reason, a fresh host observation, active directives, open to-do items, the last 20 chat messages, the last 20 actions with results and verification, and the available action schemas. Secret-looking environment values are redacted and long strings truncated.
+- **Input:** the situation model (see below), sent on stdin.
 - **Output:** Claude answers with JSON validated against a schema (`reason`, `actions`, `replies`, `sleep`, `wake_after`), which Kairo parses strictly into a `Decision`. Claude cannot run anything itself; it can only request `process.run` actions, which the runtime executes and records.
 - **Failures:** a missing CLI, a non-zero exit, a timeout, empty or invalid output, or an invalid decision is recorded with a category. Kairo then sleeps until the next wake; the process keeps running.
 - **Authentication:** whatever the local CLI is logged in with. Kairo stores no credentials.
 - **Cycle log:** every cycle leaves a small `cycle` record with provider, result or failure category, requested action kinds, sleep choice, latency and cost.
+
+## Situation model
+
+`Runtime.context()` gathers runtime state; `situation.build_situation()` turns it into what cognition sees each cycle. The situation is derived, never stored, so the runtime's records stay the only source of truth. It is plain data and does not depend on any provider.
+
+| Section | Contents |
+|---|---|
+| `kairo` | Identity, when Kairo was first created, and how many times it has started |
+| `now` | Time, lifecycle state, wake reason, current process, the previous process (and whether it ended cleanly), the previous cycle |
+| `environment` | A fresh host observation and what changed since the previous one |
+| `directives` | Active directives with age and open to-do counts, plus the number inactive |
+| `todo` | Open items and recently completed ones |
+| `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …) and output, and chat |
+| `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, the open to-do count |
+| `knowledge` | Empty for now: the place where a future knowledge store plugs in |
+| `capabilities` | The actions the runtime can really execute, and whether each is verified automatically |
+| `context` | Limits, redaction and truncation counts, what was trimmed, and anything unavailable |
+
+- **Provenance:** every section names its source, and times carry `age_seconds`. Cognition's own earlier assessments are labelled as interpretation, not fact. Missing data is shown as missing (`"unknown"`, `null`) and never invented.
+- **Bounds:** the most recent 10 cycles, 15 actions and 20 messages; 1,500 characters of output per action stream; 2,000 characters per string; and a 60,000-character total budget, met by dropping the oldest history first. Every omission is counted.
+- **Robustness:** a corrupt record is reported as unavailable and does not stop the cycle.
+
+To see exactly what cognition would be shown, without starting Kairo or calling a provider:
+`python3 -m kairo --situation --db var/kairo.db`
 
 Opt-in live smoke test (uses the model):
 `KAIRO_LIVE_CLAUDE=1 PYTHONPATH=src python3 -m unittest discover -s tests -p test_claude_live.py -v`

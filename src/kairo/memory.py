@@ -78,6 +78,12 @@ class Memory:
             ).fetchall()
         return [json.loads(r[0]) for r in reversed(rows)]
 
+    def count(self, kind: str) -> int:
+        with self._lock:
+            return self._db.execute(
+                "SELECT COUNT(*) FROM records WHERE kind = ?", (kind,)
+            ).fetchone()[0]
+
     def delete(self, kind: str, id: str) -> bool:
         with self._lock, self._db:
             cur = self._db.execute(
@@ -108,6 +114,9 @@ class Collection[T]:
 
     def all(self) -> list[T]:
         return [self._type(**d) for d in self._memory.all(self._kind)]
+
+    def count(self) -> int:
+        return self._memory.count(self._kind)
 
     def recent(self, limit: int) -> list[T]:
         return [self._type(**d) for d in self._memory.recent(self._kind, limit)]
