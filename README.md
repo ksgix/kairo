@@ -23,6 +23,7 @@ orchestrator, a task manager or a project manager.
 | `verification.py` | `Outcome` = `success` / `failure` / `unverifiable`; `Verifier` protocol. If no verifier exists, the outcome is `unverifiable`, never success by default. |
 | `memory.py` | `Memory`: a local SQLite document store (`kind`, `id`, JSON), plus a typed `Collection` view |
 | `directives.py` | `Directive`: an ongoing reason Kairo operates, not a task |
+| `work.py` | Ongoing work: pursuits carried across cycles, with states, strategy revisions and runtime-validated changes |
 | `todo.py` | `TodoItem`: operational notes. They do not drive the runtime; an empty list does not mean idle. |
 | `chat.py` | `Message` / `Chat`: persisted human ⇄ Kairo messages. A message wakes a sleeping runtime. |
 | `ipc.py` | Local Unix-socket IPC: lets other processes reach a running Kairo (`status`, `message`, `wake`, `stop`) |
@@ -54,6 +55,30 @@ Without a cognition provider, Kairo observes, sleeps with the reason `no cogniti
 - **Authentication:** whatever the local CLI is logged in with. Kairo stores no credentials.
 - **Cycle log:** every cycle leaves a small `cycle` record with provider, result or failure category, requested action kinds, sleep choice, latency and cost.
 
+## Ongoing work
+
+The layers, from most lasting to most momentary:
+
+| Layer | What it is |
+|---|---|
+| Directive | A lasting area of responsibility, set by the operator |
+| Work | A pursuit carried across cycles: objective, why it matters, strategy, understanding, next step, state. It may belong to a directive or not. |
+| Todo | Operational notes, maintained by the operator. Not required for work. |
+| Action | One runtime operation. When linked, it is an attempt at a work item. |
+| Verification | Runtime evidence about an action's outcome |
+
+- **States:** `active`, `waiting` (a condition or deadline), and `blocked` (a concrete obstacle) are open, and can move between each other or to a closed state. `completed` and `abandoned` are closed and final: closed work never changes, so a new reason means new work.
+- **Cognition requests; the runtime decides.** Cognition sends `work` requests in its decision:
+  - `create`, with a `ref` so this decision's actions can link to it;
+  - `update` of understanding, next step or strategy;
+  - `set_state`.
+
+  The runtime validates each against the stored work and applies it or rejects it. Rejections appear in the next situation. The runtime assigns every id and timestamp, and rejects unknown ids, illegal transitions, changes to closed work, duplicate objectives, unknown directives and oversized text.
+- **Completion needs evidence:** ids of the work's own attempts that succeeded. That means either verified successful, or, where no verifier exists, run with exit code 0. A non-zero exit without verification never counts. Each piece of evidence is recorded with its verification status and exit code.
+- **Completion basis:** the runtime records it as `verified` (a verifier confirmed at least one cited attempt) or `unverified` (the runtime couldn't check the outcome; the completion is cognition's judgment of results that exited 0). Cognition can't set it. Records written before this field existed show `unknown`.
+- **Retry versus new strategy:** changing the strategy gives it a new revision. Each linked action records the revision it belongs to, so a retry (same revision) is distinguishable from a changed strategy.
+- **One source of truth:** each `work` record is the only authority for that item's current state, with a short log of its own changes. Attempts are not copied into it; they are the action records that point to the work.
+
 ## Situation model
 
 `Runtime.context()` gathers runtime state; `situation.build_situation()` turns it into what cognition sees each cycle. The situation is derived, never stored, so the runtime's records stay the only source of truth. It is plain data and does not depend on any provider.
@@ -64,6 +89,7 @@ Without a cognition provider, Kairo observes, sleeps with the reason `no cogniti
 | `now` | Time, lifecycle state, wake reason, current process, the previous process (and whether it ended cleanly), the previous cycle |
 | `environment` | A fresh host observation and what changed since the previous one |
 | `directives` | Active directives with age and open to-do counts, plus the number inactive |
+| `work` | Open work, each with its recent attempts by strategy revision and recent changes, plus recently closed work with reason or evidence |
 | `todo` | Open items and recently completed ones |
 | `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …) and output, and chat |
 | `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, the open to-do count |
@@ -120,7 +146,8 @@ The tests need no network, credentials or third-party packages.
 ## Deliberately not implemented yet
 
 - Providers other than Claude, multiple providers, and delegation between providers
-- Cognition cannot yet edit directives or to-do items; its only action is `process.run`
+- Cognition cannot yet edit directives or to-do items; its only runtime action is `process.run`, alongside work requests
+- Work priority or focus, automatic resumption of elapsed waits, and automatic verifiers
 - A daemon/systemd service, cron or any scheduler; the only timing is one self-wake deadline
 - Remote access of any kind: IPC is a local Unix socket, protected only by file permissions, with no authentication
 - The full autonomous lifecycle (understand, prioritise, intend, strategise, learn, reassess)

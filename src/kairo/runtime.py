@@ -31,6 +31,7 @@ from kairo.redact import redact
 from kairo.situation import LIMITS
 from kairo.todo import Todo
 from kairo.verification import Outcome, Verification, Verifier, verify
+from kairo.work import CLOSED, OPEN, WorkError, WorkLedger
 
 log = logging.getLogger("kairo")
 
@@ -83,6 +84,7 @@ class Runtime:
         self.directives = Directives(memory)
         self.todo = Todo(memory)
         self.chat = Chat(memory)
+        self.work = WorkLedger(memory)
         self.state = State.CREATED
         self.reason = ""
         # What the previous process left behind, if anything.
@@ -317,11 +319,22 @@ class Runtime:
             done_todo=read("done_todo", lambda: sorted(
                 self.todo.done(), key=lambda t: t.done_at or 0)[-LIMITS.done_todo:], []),
             counts={kind: self.memory.count(kind)
-                    for kind in ("directive", "todo", "message", "action", "cycle")},
+                    for kind in ("directive", "todo", "message", "action", "cycle", "work")},
             previous_observation=self.memory.get("runtime", "last_cycle"),
+            **read("work", self._gather_work, {}),
         )
         runtime["unreadable_records"] = unreadable
         return context
+
+    def _gather_work(self) -> dict[str, Any]:
+        records = [r for r in self.memory.all("work") if isinstance(r, dict)]
+        open_work = sorted((r for r in records if r.get("state") in OPEN),
+                           key=lambda r: r.get("updated_at") or 0)[-LIMITS.work_open:]
+        closed = sorted((r for r in records if r.get("state") in CLOSED),
+                        key=lambda r: r.get("state_since") or 0)[-LIMITS.work_closed:]
+        attempts = {r["id"]: self.work.attempts(r["id"], LIMITS.work_attempts)
+                    for r in open_work if isinstance(r.get("id"), str)}
+        return {"open_work": open_work, "closed_work": closed, "work_attempts": attempts}
 
     def cycle(self) -> CycleReport:
         with self._cond:
@@ -372,6 +385,8 @@ class Runtime:
             if not all(isinstance(a, Action) for a in decision.actions):
                 raise CognitionError("invalid_decision",
                                      "Decision.actions must contain only Action instances")
+            if not isinstance(decision.work, list):
+                raise CognitionError("invalid_decision", "Decision.work must be a list")
         except Exception as exc:  # a failing provider must not take the runtime down
             category = getattr(exc, "category", "provider_error")
             if isinstance(exc, CognitionError):
@@ -393,14 +408,27 @@ class Runtime:
             "replies": len(decision.replies),
             "meta": decision.meta,
         }
-        log.info("cognition decided: %d action(s), %d reply(ies), sleep=%s",
-                 len(decision.actions), len(decision.replies), decision.sleep)
+        log.info("cognition decided: %d action(s), %d reply(ies), %d work request(s), sleep=%s",
+                 len(decision.actions), len(decision.replies), len(decision.work), decision.sleep)
 
+        # Work requests first: new work can then be linked by this decision's
+        # actions, and a completion can only cite results cognition has seen.
+        work = self.work.apply(decision.work)
+        rejected = list(work.rejected)
         steps = []
         for action in decision.actions:
             if self._stop_requested:  # stopping: take on no new work
                 break
-            steps.append(self.act(action))
+            try:
+                work_id = self.work.resolve(action.work_id, work.refs)
+            except WorkError as exc:  # still run it, but unlinked, and say so
+                rejected.append({"op": "link", "target": action.work_id, "reason": str(exc)})
+                work_id = None
+            steps.append(self.act(dataclasses.replace(action, work_id=work_id)))
+        if work.applied or rejected:
+            summary["work"] = {"applied": work.applied, "rejected": rejected}
+            if rejected:
+                log.warning("work requests rejected: %s", [r["reason"] for r in rejected])
         for reply in decision.replies:
             self.chat.post(Sender.KAIRO, reply)
         sleep_reason = (redact(decision.reason or "cognition chose to sleep", limit=1000)
@@ -413,6 +441,9 @@ class Runtime:
         # Records are redacted and bounded: output may contain secrets or be huge.
         record: dict[str, Any] = {**dataclasses.asdict(action), "status": "started",
                                   "started_at": time.time()}
+        if action.work_id is not None:  # which strategy of that work this attempt belongs to
+            work = self.work.get(action.work_id)
+            record["strategy_revision"] = work.strategy_revision if work else None
         self.memory.put("action", action.id, redact(record, limit=STORED_STRING_LIMIT))
         # Neither a bad action nor a faulty verifier may take the runtime down.
         try:

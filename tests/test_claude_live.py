@@ -35,6 +35,47 @@ class LiveClaudeSmokeTest(unittest.TestCase):
         print(f"\nlive decision: sleep={decision.sleep} actions={len(decision.actions)} "
               f"replies={decision.replies!r} reason={decision.reason!r} meta={decision.meta}")
 
+    def test_continues_existing_work_after_a_failed_attempt(self):
+        from kairo import Action
+        from kairo.work import OPEN
+
+        memory = Memory()
+        self.addCleanup(memory.close)
+        cognition = ClaudeCognition(model=os.environ.get("KAIRO_LIVE_MODEL", "haiku"),
+                                    timeout=180)
+        runtime = Runtime(memory, cognition=cognition)
+        runtime.start()
+        d = runtime.directives.add("Keep this host healthy and tell the human about real problems.")
+        refs = runtime.work.apply([
+            {"op": "create", "ref": "disk", "objective": "Find out how large /var/log is",
+             "why": "disk usage has been growing", "directive_id": d.id,
+             "strategy": "use a disk-usage tool", "next_step": "measure /var/log"},
+            {"op": "create", "ref": "done", "objective": "Check the hostname is set",
+             "why": "operator asked", "directive_id": None, "strategy": "", "next_step": ""},
+        ]).refs
+        runtime.act(Action("process.run", {"argv": ["/usr/bin/diskusage-tool", "/var/log"]},
+                           reason="measure /var/log", work_id=refs["disk"]))
+        runtime.act(Action("process.run", {"argv": ["hostname"]}, reason="read hostname",
+                           work_id=refs["done"]))
+        evidence = runtime.work.attempts(refs["done"], 1)[0]["id"]
+        runtime.work.apply([{"op": "set_state", "work_id": refs["done"], "state": "completed",
+                             "reason": "hostname is set", "wait_seconds": None,
+                             "evidence": [evidence]}])
+
+        decision = cognition.decide(runtime.context())
+
+        touched = {r.get("work_id") for r in decision.work} | {a.work_id for a in decision.actions}
+        self.assertIn(refs["disk"], touched, "expected the existing work to be continued")
+        self.assertNotIn(refs["done"], touched, "completed work must not be resumed")
+        creates = [r for r in decision.work if r["op"] == "create"]
+        self.assertFalse(any("/var/log" in r["objective"] for r in creates), "duplicated work")
+        outcome = runtime.work.apply(decision.work)  # validate as the runtime would
+        self.assertEqual(outcome.rejected, [])
+        self.assertIn(runtime.work.get(refs["disk"]).state, OPEN)
+        print(f"\nlive work decision: work={decision.work} actions="
+              f"{[(a.params, a.work_id == refs['disk']) for a in decision.actions]} "
+              f"reason={decision.reason!r}")
+
 
 if __name__ == "__main__":
     unittest.main()

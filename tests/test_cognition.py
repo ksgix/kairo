@@ -56,8 +56,15 @@ sys.exit(step.get("exit", 0))
 
 
 def decision(**overrides):
-    base = {"reason": "assessed", "actions": [], "replies": [], "sleep": True, "wake_after": None}
-    return {**base, **overrides}
+    """A decision as a provider returns it. Actions given without a 'work' field get
+    work=None, so each test only spells out what it is about."""
+    base = {"reason": "assessed", "actions": [], "replies": [], "sleep": True,
+            "wake_after": None, "work": []}
+    d = {**base, **overrides}
+    if isinstance(d["actions"], list):
+        d["actions"] = [{**a, "work": a.get("work")} if isinstance(a, dict) and "kind" in a
+                        and "reason" in a else a for a in d["actions"]]
+    return d
 
 
 class FakeClaude:

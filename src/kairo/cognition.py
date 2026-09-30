@@ -23,6 +23,7 @@ from kairo.actions import Action
 from kairo.chat import Message
 from kairo.directives import Directive
 from kairo.todo import TodoItem
+from kairo.work import MAX_EVIDENCE, MAX_REQUESTS, WorkState
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,11 @@ class Context:
     # Knowledge retrieved for this cycle. The boundary for a future knowledge
     # store; nothing fills it yet.
     knowledge: list[dict[str, Any]] = field(default_factory=list)
+    # Ongoing work records (see kairo.work): open ones and recently closed ones,
+    # and each open item's most recent attempts (linked action records).
+    open_work: list[dict[str, Any]] = field(default_factory=list)
+    closed_work: list[dict[str, Any]] = field(default_factory=list)
+    work_attempts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,9 @@ class Decision:
     # When sleeping: reassess after this many seconds. None means use the
     # runtime's default reassessment interval (which may be "until woken").
     wake_after: float | None = None
+    # Requests to create or change ongoing work, validated and applied by the
+    # runtime (see kairo.work). Plain dicts shaped as in decision_schema.
+    work: list[dict[str, Any]] = field(default_factory=list)
     # Provider bookkeeping for observability (model, duration, cost, ...).
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -89,8 +98,19 @@ class CognitionError(Exception):
 
 # -- decisions from providers ------------------------------------------------
 
-DECISION_FIELDS = {"reason", "actions", "replies", "sleep", "wake_after"}
-ACTION_FIELDS = {"kind", "params", "reason"}
+DECISION_FIELDS = {"reason", "actions", "replies", "sleep", "wake_after", "work"}
+ACTION_FIELDS = {"kind", "params", "reason", "work"}
+WORK_FIELDS = {
+    "create": {"op", "ref", "objective", "why", "directive_id", "strategy", "next_step"},
+    "update": {"op", "work_id", "understanding", "strategy", "next_step"},
+    "set_state": {"op", "work_id", "state", "reason", "wait_seconds", "evidence"},
+}
+# Fields that may be null, per request kind (all other string fields must be strings).
+WORK_NULLABLE = {"create": {"directive_id"},
+                 "update": {"understanding", "strategy", "next_step"},
+                 "set_state": set()}
+_STR = {"type": "string"}
+_OPT_STR = {"type": ["string", "null"]}
 
 
 def decision_schema(available_actions: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -102,6 +122,9 @@ def decision_schema(available_actions: dict[str, dict[str, Any]]) -> dict[str, A
                 "kind": {"const": kind},
                 "params": spec["params"],
                 "reason": {"type": "string"},
+                # The work this action is an attempt at: a work id, a ref created in
+                # this decision, or null.
+                "work": _OPT_STR,
             },
             "required": sorted(ACTION_FIELDS),
             "additionalProperties": False,
@@ -116,10 +139,69 @@ def decision_schema(available_actions: dict[str, dict[str, Any]]) -> dict[str, A
             "replies": {"type": "array", "items": {"type": "string"}},
             "sleep": {"type": "boolean"},
             "wake_after": {"type": ["number", "null"], "minimum": 0},
+            "work": {"type": "array", "maxItems": MAX_REQUESTS,
+                     "items": {"anyOf": _work_variants()}},
         },
         "required": sorted(DECISION_FIELDS),
         "additionalProperties": False,
     }
+
+
+def _work_variants() -> list[dict[str, Any]]:
+    props = {
+        "create": {"op": {"const": "create"}, "ref": _STR, "objective": _STR, "why": _STR,
+                   "directive_id": _OPT_STR, "strategy": _STR, "next_step": _STR},
+        "update": {"op": {"const": "update"}, "work_id": _STR, "understanding": _OPT_STR,
+                   "strategy": _OPT_STR, "next_step": _OPT_STR},
+        "set_state": {"op": {"const": "set_state"}, "work_id": _STR,
+                      "state": {"enum": [s.value for s in WorkState]}, "reason": _STR,
+                      "wait_seconds": {"type": ["number", "null"]},
+                      "evidence": {"type": "array", "items": _STR, "maxItems": MAX_EVIDENCE}},
+    }
+    return [{"type": "object", "properties": props[op], "required": sorted(WORK_FIELDS[op]),
+             "additionalProperties": False} for op in WORK_FIELDS]
+
+
+def _parse_work(requests: Any) -> list[dict[str, Any]]:
+    """Structural checks only; whether a request makes sense is decided by the
+    runtime against persisted state (kairo.work.WorkLedger)."""
+
+    def invalid(message: str) -> CognitionError:
+        return CognitionError("invalid_decision", message)
+
+    if not isinstance(requests, list):
+        raise invalid("'work' must be a list")
+    if len(requests) > MAX_REQUESTS:
+        raise invalid(f"at most {MAX_REQUESTS} work requests per decision")
+    refs = set()
+    for i, r in enumerate(requests):
+        if not isinstance(r, dict) or r.get("op") not in WORK_FIELDS:
+            raise invalid(f"work request {i} must be an object with op create/update/set_state")
+        if r.keys() != WORK_FIELDS[r["op"]]:
+            raise invalid(f"work request {i} ({r['op']}) must have exactly the fields "
+                          f"{sorted(WORK_FIELDS[r['op']])}")
+        for key, value in r.items():
+            if key in ("op", "evidence", "wait_seconds"):
+                continue
+            nullable = key in WORK_NULLABLE[r["op"]]
+            if not (isinstance(value, str) or (nullable and value is None)):
+                raise invalid(f"work request {i}: '{key}' must be a string"
+                              + (" or null" if nullable else ""))
+        if r["op"] == "create":
+            if not r["ref"] or r["ref"] in refs:
+                raise invalid(f"work request {i}: 'ref' must be non-empty and unique")
+            refs.add(r["ref"])
+        if r["op"] == "set_state":
+            wait = r["wait_seconds"]
+            if wait is not None and (isinstance(wait, bool) or not isinstance(wait, (int, float))
+                                     or not math.isfinite(wait)):
+                raise invalid(f"work request {i}: 'wait_seconds' must be null or a number")
+            ev = r["evidence"]
+            if not isinstance(ev, list) or len(ev) > MAX_EVIDENCE or \
+                    not all(isinstance(x, str) for x in ev):
+                raise invalid(f"work request {i}: 'evidence' must be a list of at most "
+                              f"{MAX_EVIDENCE} action ids")
+    return requests
 
 
 def parse_decision(data: Any, available_actions: dict[str, dict[str, Any]]) -> Decision:
@@ -138,6 +220,7 @@ def parse_decision(data: Any, available_actions: dict[str, dict[str, Any]]) -> D
 
     reason, actions, replies, sleep, wake_after = (
         data["reason"], data["actions"], data["replies"], data["sleep"], data["wake_after"])
+    work = _parse_work(data["work"])
     if not isinstance(reason, str):
         raise invalid("'reason' must be a string")
     if not isinstance(sleep, bool):
@@ -160,7 +243,10 @@ def parse_decision(data: Any, available_actions: dict[str, dict[str, Any]]) -> D
             raise invalid(f"action {i} has unsupported kind {a['kind']!r}")
         if not isinstance(a["params"], dict) or not isinstance(a["reason"], str):
             raise invalid(f"action {i}: 'params' must be an object and 'reason' a string")
-        parsed.append(Action(a["kind"], a["params"], reason=a["reason"]))
+        if a["work"] is not None and not isinstance(a["work"], str):
+            raise invalid(f"action {i}: 'work' must be a work id, a ref, or null")
+        # work_id holds the name cognition used; the runtime resolves and validates it.
+        parsed.append(Action(a["kind"], a["params"], reason=a["reason"], work_id=a["work"]))
 
     return Decision(
         actions=parsed,
@@ -168,4 +254,5 @@ def parse_decision(data: Any, available_actions: dict[str, dict[str, Any]]) -> D
         sleep=sleep,
         reason=reason,
         wake_after=float(wake_after) if wake_after is not None else None,
+        work=work,
     )

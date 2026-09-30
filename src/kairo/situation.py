@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable
 
+from kairo.actions import action_state
 from kairo.cognition import Context
 from kairo.redact import MARKER, redact
 
@@ -44,6 +45,10 @@ class Limits:
     text: int = 2000           # characters per string, anywhere
     action_output: int = 1500  # characters of stdout / stderr per action
     assessment: int = 600      # characters of an earlier cycle's assessment
+    work_open: int = 8         # open work items (most recently updated)
+    work_closed: int = 5       # recently completed or abandoned work items
+    work_attempts: int = 4     # recent attempts shown per open work item
+    work_history: int = 5      # recent changes shown per open work item
     budget: int = 60_000       # characters of rendered JSON; oldest history goes first
 
 
@@ -69,6 +74,7 @@ def build_situation(context: Context, limits: Limits = LIMITS) -> dict[str, Any]
         "now": section("now", lambda: _now(context, now)),
         "environment": section("environment", lambda: _environment(context, now)),
         "directives": section("directives", lambda: _directives(context, now, limits)),
+        "work": section("work", lambda: _work(context, now, limits)),
         "todo": section("todo", lambda: _todo(context, now, limits)),
         "history": {
             "cycles": section("history.cycles", lambda: _cycles(context, now, limits)),
@@ -238,6 +244,10 @@ def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             item["chose_sleep"] = cog.get("sleep")
             item["wake_after_seconds"] = cog.get("wake_after")
             item["assessment"] = _cap(rec.get("note"), limits.assessment)
+            work = cog.get("work") or {}
+            if work:
+                item["work_applied"] = work.get("applied") or []
+                item["work_rejected"] = work.get("rejected") or []
         items.append(item)
     return {
         "source": "runtime cycle log",
@@ -246,20 +256,6 @@ def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         "items": items,
         "omitted_older": _omitted(ctx.counts.get("cycle"), len(items)),
     }
-
-
-def action_state(record: dict[str, Any]) -> str:
-    """The runtime's own verdict on an action record."""
-    status = record.get("status")
-    if status == "interrupted":
-        return "interrupted"
-    if status == "started":
-        return "in_progress"
-    if not (record.get("result") or {}).get("executed"):
-        return "failed_to_execute"
-    outcome = (record.get("verification") or {}).get("outcome")
-    return {"success": "verified_successful",
-            "failure": "verified_failed"}.get(outcome, "executed_unverified")
 
 
 def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
@@ -319,6 +315,8 @@ def _open_threads(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
                  ("failed_to_execute", "verified_failed", "interrupted", "in_progress")]
     last = _last(ctx.recent_cycles)
     last_cog = (last or {}).get("cognition") or {}
+    waits_over = [w.get("id") for w in ctx.open_work if w.get("state") == "waiting"
+                  and _number(w.get("waiting_until")) is not None and w["waiting_until"] <= now]
     return {
         "source": "derived by the runtime from the records in this context",
         "meaning": ("Loose ends visible in the records. Informational, not a task list and not "
@@ -332,7 +330,89 @@ def _open_threads(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         "previous_cycle_failed": {"failure": last_cog.get("failure"),
                                   "ended": _when(last.get("at"), now)}
         if last is not None and last_cog.get("result") == "failed" else None,
+        # Work requests the runtime refused last cycle, with its reasons.
+        "work_requests_rejected": (last_cog.get("work") or {}).get("rejected") or [],
+        # Waiting work whose own waiting time has passed.
+        "work_wait_elapsed": waits_over,
         "open_todo_items": len(ctx.todo),
+    }
+
+
+def _work(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    def attempt(rec: dict[str, Any]) -> dict[str, Any]:
+        result = rec.get("result") or {}
+        output = result.get("output") or {}
+        state = action_state(rec)
+        item = {"action_id": rec.get("id"), "strategy_revision": rec.get("strategy_revision"),
+                "requested": _when(rec.get("started_at"), now), "state": state,
+                "purpose": rec.get("reason"), "returncode": output.get("returncode")}
+        if state not in ("verified_successful", "executed_unverified"):
+            item["problem"] = _cap(result.get("error") or output.get("stderr"), 300)
+        return item
+
+    def open_item(w: dict[str, Any]) -> dict[str, Any]:
+        attempts = ctx.work_attempts.get(w.get("id")) or []
+        revision = w.get("strategy_revision")
+        current = [a for a in attempts if a.get("strategy_revision") == revision]
+        item = {
+            "id": w.get("id"),
+            "state": w.get("state"),
+            "in_state_since": _when(w.get("state_since"), now),
+            "directive_id": w.get("directive_id"),
+            "objective": w.get("objective"),
+            "why": w.get("why"),
+            "strategy": {"revision": revision, "text": w.get("strategy")},
+            "understanding": w.get("understanding"),
+            "next_step": w.get("next_step"),
+            "created": _when(w.get("created_at"), now),
+            "updated": _when(w.get("updated_at"), now),
+            "recent_attempts": [attempt(a) for a in attempts],
+            "attempts_with_current_strategy": {
+                "shown": len(current),
+                "failed": sum(action_state(a) not in ("verified_successful", "executed_unverified")
+                              for a in current)},
+            "recent_changes": [{**_when(h.get("at"), now), **{k: v for k, v in h.items() if k != "at"}}
+                               for h in (w.get("history") or [])[-limits.work_history:]],
+        }
+        if w.get("state") != "active":
+            item["state_reason"] = w.get("state_reason")
+        until = _number(w.get("waiting_until"))
+        if until is not None:
+            item["waiting_until"] = _deadline(until, now)
+            item["wait_elapsed"] = until <= now
+        return item
+
+    def closed_item(w: dict[str, Any]) -> dict[str, Any]:
+        item = {"id": w.get("id"), "state": w.get("state"), "objective": w.get("objective"),
+                "closed": _when(w.get("state_since"), now), "reason": w.get("state_reason"),
+                "directive_id": w.get("directive_id")}
+        if w.get("state") == "completed":
+            basis = w.get("completion_basis")
+            # Only the runtime's own values are shown; anything else is unknown.
+            item["completion_basis"] = basis if basis in ("verified", "unverified") else "unknown"
+            item["evidence"] = w.get("evidence")
+        return item
+
+    total, shown = ctx.counts.get("work"), len(ctx.open_work) + len(ctx.closed_work)
+    return {
+        "source": "runtime work records; attempts are this work's linked actions",
+        "meaning": ("Ongoing work: pursuits Kairo carries across cycles, each with an objective, "
+                    "a state and a history. 'waiting' is paused until its condition or time; "
+                    "'blocked' has a concrete obstacle. Completed and abandoned work is history: "
+                    "it cannot resume; a new reason means new work. Work need not have todo items "
+                    "or a directive."),
+        "note": ("objective, why, strategy text, understanding, next_step and reasons are "
+                 "cognition's own earlier words (interpretation). States, times, strategy "
+                 "revisions, attempts, completion evidence and completion_basis are runtime "
+                 "facts."),
+        "completion_basis": (
+            "For completed work, recorded by the runtime: 'verified' means a runtime verifier "
+            "confirmed at least one cited attempt succeeded. 'unverified' means the runtime did "
+            "not independently verify the objective: the completion is cognition's judgment, "
+            "based on attempts that ran and exited 0. 'unknown' means no basis was recorded."),
+        "open": [open_item(w) for w in ctx.open_work],
+        "recently_closed": [closed_item(w) for w in ctx.closed_work],
+        "omitted": _omitted(total, shown),
     }
 
 
@@ -342,7 +422,7 @@ def _knowledge(ctx: Context, now: float) -> dict[str, Any]:
             "source": "none",
             "items": [],
             "note": ("Kairo has no separate knowledge store yet. Everything it remembers "
-                     "persistently is in the directives, todo, history and open_threads "
+                     "persistently is in the directives, work, todo, history and open_threads "
                      "sections."),
         }
     return {"source": "runtime knowledge retrieval", "items": ctx.knowledge}
@@ -360,6 +440,19 @@ def _capabilities(ctx: Context) -> dict[str, Any]:
         "verification": ("Actions without an automatic verifier are recorded with outcome "
                          "'unverifiable' even when they ran; judge the outcome from the recorded "
                          "result or observe again."),
+        "work_requests": (
+            "Your decision's 'work' list asks the runtime to change ongoing work; it validates "
+            "each request and reports refusals next cycle in open_threads. create: new work "
+            "(objective, why, optional directive_id, strategy, next_step; 'ref' names it so "
+            "this decision's actions can link to it). update: understanding, next_step, or "
+            "strategy (a changed strategy gets a new revision; attempts are grouped by it). "
+            "set_state: active, waiting (reason is the condition; optional wait_seconds), "
+            "blocked (reason is the obstacle), abandoned (reason), or completed (reason, plus "
+            "'evidence': ids of this work's attempts that achieved the outcome; each must be "
+            "verified successful, or, unverified, have exited 0; the runtime records whether "
+            "the completion is verified or unverified). "
+            "Completed and abandoned work cannot change. Link each action to the work it is "
+            "an attempt at with its 'work' field (a work id or a ref)."),
     }
 
 
@@ -404,6 +497,13 @@ def _when(t: Any, now: float) -> dict[str, Any]:
     if t > now + 1:  # a clock change: no honest age exists
         return {"at": _iso(t), "age_seconds": None, "note": "recorded later than now (clock change?)"}
     return {"at": _iso(t), "age_seconds": max(round(now - t), 0)}
+
+
+def _deadline(t: float, now: float) -> dict[str, Any]:
+    """A time something is due: legitimately in the future, unlike a record time."""
+    if t > now:
+        return {"at": _iso(t), "due_in_seconds": round(t - now)}
+    return {"at": _iso(t), "passed_seconds_ago": round(now - t)}
 
 
 def _cap(text: Any, limit: int) -> Any:

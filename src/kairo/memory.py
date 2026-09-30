@@ -78,6 +78,17 @@ class Memory:
             ).fetchall()
         return [json.loads(r[0]) for r in reversed(rows)]
 
+    def recent_where(self, kind: str, field: str, value: str, limit: int) -> list[dict[str, Any]]:
+        """The last ``limit`` records of a kind whose top-level ``field`` equals
+        ``value``, oldest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT data FROM records WHERE kind = ? AND json_extract(data, ?) = ? "
+                "ORDER BY seq DESC LIMIT ?",
+                (kind, f"$.{field}", value, limit),
+            ).fetchall()
+        return [json.loads(r[0]) for r in reversed(rows)]
+
     def count(self, kind: str) -> int:
         with self._lock:
             return self._db.execute(
