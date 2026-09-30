@@ -15,7 +15,9 @@ orchestrator, a task manager or a project manager.
 |---|---|
 | `runtime.py` | `Runtime`: lifecycle states `created → awake ⇄ sleeping → stopped`; `cycle()` (observe → ask cognition → execute → verify → persist → maybe sleep) and `run_forever()` (continuous operation) |
 | `environment.py` | `Environment`: `observe()` describes the host; `execute(Action)` runs structured actions (currently only `process.run` with an `argv` list, never shell text) |
-| `cognition.py` | `CognitionProvider` protocol: `decide(Context) -> Decision`. No provider is built in. |
+| `cognition.py` | `CognitionProvider` protocol: `decide(Context) -> Decision`, plus shared helpers: bounded and redacted context rendering, the decision JSON schema, and strict decision parsing |
+| `claude.py` | `ClaudeCognition`: the first real provider, which calls the locally installed Claude Code CLI |
+| `redact.py` | Removes secret environment values and caps oversized strings before anything is persisted or sent to cognition |
 | `actions.py` | `Action` (what was decided) and `ActionResult` (whether execution completed) |
 | `verification.py` | `Outcome` = `success` / `failure` / `unverifiable`; `Verifier` protocol. If no verifier exists, the outcome is `unverifiable`, never success by default. |
 | `memory.py` | `Memory`: a local SQLite document store (`kind`, `id`, JSON), plus a typed `Collection` view |
@@ -41,6 +43,19 @@ orchestrator, a task manager or a project manager.
 
 Without a cognition provider, Kairo observes, sleeps with the reason `no cognition provider configured`, and wakes (and sleeps again) on messages or its reassessment interval.
 
+## Cognition (Claude)
+
+`--cognition claude` makes the local `claude` CLI Kairo's cognition. Each cycle is one headless call: `claude -p` with `--tools ""` (no tools), `--restricted`, `--strict-mcp-config` and `--no-session-persistence`.
+
+- **Input:** the runtime context, sent on stdin. It includes identity and lifecycle state, the wake reason, a fresh host observation, active directives, open to-do items, the last 20 chat messages, the last 20 actions with results and verification, and the available action schemas. Secret-looking environment values are redacted and long strings truncated.
+- **Output:** Claude answers with JSON validated against a schema (`reason`, `actions`, `replies`, `sleep`, `wake_after`), which Kairo parses strictly into a `Decision`. Claude cannot run anything itself; it can only request `process.run` actions, which the runtime executes and records.
+- **Failures:** a missing CLI, a non-zero exit, a timeout, empty or invalid output, or an invalid decision is recorded with a category. Kairo then sleeps until the next wake; the process keeps running.
+- **Authentication:** whatever the local CLI is logged in with. Kairo stores no credentials.
+- **Cycle log:** every cycle leaves a small `cycle` record with provider, result or failure category, requested action kinds, sleep choice, latency and cost.
+
+Opt-in live smoke test (uses the model):
+`KAIRO_LIVE_CLAUDE=1 PYTHONPATH=src python3 -m unittest discover -s tests -p test_claude_live.py -v`
+
 ## Running (development)
 
 ```sh
@@ -48,7 +63,8 @@ cd /opt/kairo
 export PYTHONPATH=src
 
 # run continuously in the foreground (Ctrl-C also stops it cleanly)
-python3 -m kairo --run --db var/kairo.db [--socket var/kairo.sock] [--reassess SECONDS]
+python3 -m kairo --run --db var/kairo.db [--socket var/kairo.sock] [--reassess SECONDS] \
+    [--cognition claude [--model MODEL] [--cognition-timeout SECONDS]]
 
 # from another terminal, talk to the running process
 python3 -m kairo.ipc status
@@ -78,7 +94,8 @@ The tests need no network, credentials or third-party packages.
 
 ## Deliberately not implemented yet
 
-- Any real cognition provider, API calls or credentials, and delegation between providers
+- Providers other than Claude, multiple providers, and delegation between providers
+- Cognition cannot yet edit directives or to-do items; its only action is `process.run`
 - A daemon/systemd service, cron or any scheduler; the only timing is one self-wake deadline
 - Remote access of any kind: IPC is a local Unix socket, protected only by file permissions, with no authentication
 - The full autonomous lifecycle (understand, prioritise, intend, strategise, learn, reassess)

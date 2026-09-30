@@ -23,10 +23,11 @@ from typing import Any
 
 from kairo.actions import Action, ActionResult
 from kairo.chat import Chat, Message, Sender
-from kairo.cognition import CognitionProvider, Context, Decision
+from kairo.cognition import CognitionError, CognitionProvider, Context, Decision
 from kairo.directives import Directives
 from kairo.environment import Environment
 from kairo.memory import Memory
+from kairo.redact import redact
 from kairo.todo import Todo
 from kairo.verification import Outcome, Verification, Verifier, verify
 
@@ -34,6 +35,7 @@ log = logging.getLogger("kairo")
 
 CONTEXT_MESSAGES = 20
 CONTEXT_ACTIONS = 20
+STORED_STRING_LIMIT = 16_000  # characters per string in persisted action records
 
 
 class State(StrEnum):
@@ -59,6 +61,8 @@ class CycleReport:
     state: State
     steps: list[Step] = field(default_factory=list)
     note: str = ""
+    # Small summary of what cognition did this cycle, for the cycle log.
+    cognition: dict[str, Any] = field(default_factory=dict)
 
 
 class Runtime:
@@ -259,6 +263,15 @@ class Runtime:
     # -- cycle -------------------------------------------------------------
 
     def context(self) -> Context:
+        with self._cond:
+            runtime = {
+                "identity": self.identity["id"],
+                "born_at": self.identity["born_at"],
+                "starts": self.identity["starts"],
+                "state": self.state,
+                "now": time.time(),
+                "default_reassess_after": self.reassess_after,
+            }
         return Context(
             environment=self.environment.observe(),
             directives=self.directives.active(),
@@ -266,6 +279,8 @@ class Runtime:
             messages=self.chat.recent(CONTEXT_MESSAGES),
             wake_reason=self.reason,
             recent_actions=self.memory.recent("action", CONTEXT_ACTIONS),
+            runtime=runtime,
+            available_actions=self.environment.actions(),
         )
 
     def cycle(self) -> CycleReport:
@@ -276,35 +291,68 @@ class Runtime:
             self._wake_pending = None
 
         context = self.context()
-        report = self._decide_and_act(context)
-        self.memory.put("runtime", "last_cycle", {
+        steps, note, cognition, sleep_reason, wake_after = self._decide_and_act(context)
+        summary = {
             "at": time.time(),
             "wake_reason": context.wake_reason,
-            "observation": context.environment,
-            "cognition": getattr(self.cognition, "name", None),
-            "actions": [s.action.id for s in report.steps],
-            "state": report.state,
-            "note": report.note,
-        })
-        return report
+            "cognition": {"provider": getattr(self.cognition, "name", None), **cognition},
+            "actions": [{"id": s.action.id, "kind": s.action.kind,
+                         "outcome": s.verification.outcome} for s in steps],
+            "state": State.SLEEPING if sleep_reason is not None else State.AWAKE,
+            "note": note,
+        }
+        # The cycle is recorded before any sleep transition, so whoever sees the
+        # runtime asleep also sees the cycle that led there. One small record per
+        # cycle (the cognition log), plus the latest cycle with its observation.
+        self.memory.put("cycle", uuid.uuid4().hex, redact(summary, limit=1000))
+        self.memory.put("runtime", "last_cycle",
+                        redact({**summary, "observation": context.environment}, limit=1000))
+        if sleep_reason is not None:
+            self.sleep(sleep_reason, wake_after)
+        return CycleReport(self.state, steps, note=note, cognition=cognition)
 
-    def _decide_and_act(self, context: Context) -> CycleReport:
+    def _decide_and_act(
+        self, context: Context,
+    ) -> tuple[list[Step], str, dict[str, Any], str | None, float | None]:
+        """Returns (steps, note, cognition summary, sleep reason or None, wake_after)."""
         if self.cognition is None:
-            self.sleep("no cognition provider configured")
-            return CycleReport(self.state, note=self.reason)
+            reason = "no cognition provider configured"
+            return [], reason, {"result": "none"}, reason, None
 
+        started = time.monotonic()
         try:
             decision = self.cognition.decide(context)
             # Provider output is untrusted: a malformed decision is a cognition
             # failure, not something to half-execute.
             if not isinstance(decision, Decision):
-                raise TypeError(f"decide() returned {type(decision).__name__}, not Decision")
+                raise CognitionError("invalid_decision",
+                                     f"decide() returned {type(decision).__name__}, not Decision")
             if not all(isinstance(a, Action) for a in decision.actions):
-                raise TypeError("Decision.actions must contain only Action instances")
+                raise CognitionError("invalid_decision",
+                                     "Decision.actions must contain only Action instances")
         except Exception as exc:  # a failing provider must not take the runtime down
-            log.exception("cognition provider failed")
-            self.sleep(f"cognition error: {exc!r}")
-            return CycleReport(self.state, note=self.reason)
+            category = getattr(exc, "category", "provider_error")
+            if isinstance(exc, CognitionError):
+                log.error("cognition failed (%s): %s", category, exc)
+                detail = str(exc)
+            else:
+                log.exception("cognition provider failed")
+                detail = repr(exc)
+            reason = redact(f"cognition error ({category}): {detail}", limit=500)
+            return [], reason, {"result": "failed", "failure": category,
+                                "seconds": round(time.monotonic() - started, 3)}, reason, None
+
+        summary = {
+            "result": "decided",
+            "seconds": round(time.monotonic() - started, 3),
+            "sleep": decision.sleep,
+            "wake_after": decision.wake_after,
+            "requested": [a.kind for a in decision.actions],
+            "replies": len(decision.replies),
+            "meta": decision.meta,
+        }
+        log.info("cognition decided: %d action(s), %d reply(ies), sleep=%s",
+                 len(decision.actions), len(decision.replies), decision.sleep)
 
         steps = []
         for action in decision.actions:
@@ -313,16 +361,17 @@ class Runtime:
             steps.append(self.act(action))
         for reply in decision.replies:
             self.chat.post(Sender.KAIRO, reply)
-        if decision.sleep:
-            self.sleep(decision.reason or "cognition chose to sleep", decision.wake_after)
-        return CycleReport(self.state, steps, note=decision.reason)
+        sleep_reason = (redact(decision.reason or "cognition chose to sleep", limit=1000)
+                        if decision.sleep else None)
+        return steps, decision.reason, summary, sleep_reason, decision.wake_after
 
     def act(self, action: Action) -> Step:
         # The action is logged as started before it runs, so a crash mid-action
         # is visible after restart instead of being silently forgotten or replayed.
+        # Records are redacted and bounded: output may contain secrets or be huge.
         record: dict[str, Any] = {**dataclasses.asdict(action), "status": "started",
                                   "started_at": time.time()}
-        self.memory.put("action", action.id, record)
+        self.memory.put("action", action.id, redact(record, limit=STORED_STRING_LIMIT))
         # Neither a bad action nor a faulty verifier may take the runtime down.
         try:
             result = self.environment.execute(action)
@@ -337,5 +386,5 @@ class Runtime:
         record.update(status="finished", finished_at=time.time(),
                       result=dataclasses.asdict(result),
                       verification=dataclasses.asdict(verification))
-        self.memory.put("action", action.id, record)
+        self.memory.put("action", action.id, redact(record, limit=STORED_STRING_LIMIT))
         return Step(action, result, verification)

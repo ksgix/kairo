@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from kairo import (
-    Action, Decision, LifecycleError, Memory, Outcome, Runtime, Sender, State, Verification,
+    Action, Decision, Environment, LifecycleError, Memory, Outcome, Runtime, Sender, State, Verification,
 )
 from kairo.__main__ import main
 
@@ -190,8 +190,13 @@ class UntrustedCognitionOutputTest(unittest.TestCase):
                 self.assertEqual(self.memory.all("action"), [])
 
     def test_executor_exception_becomes_failed_step(self):
-        bad = Action("process.run", {"argv": ["true"], "timeout": "5"})
-        runtime, report = self.run_one(Decision(actions=[bad], sleep=True))
+        class Exploding(Environment):
+            def execute(self, action):
+                raise RuntimeError("executor bug")
+
+        bad = Action("process.run", {"argv": ["true"]})
+        runtime, report = self.run_one(Decision(actions=[bad], sleep=True),
+                                       environment=Exploding())
         [step] = report.steps
         self.assertFalse(step.result.executed)
         self.assertIn("executor raised", step.result.error)

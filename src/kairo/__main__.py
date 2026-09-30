@@ -3,10 +3,11 @@
 ``python -m kairo [--db PATH]``
     Start, run one cycle, print the resulting state, stop.
 
-``python -m kairo --run [--db PATH] [--socket PATH] [--reassess SECONDS]``
+``python -m kairo --run [--db PATH] [--socket PATH] [--reassess SECONDS] [--cognition claude]``
     Operate continuously in the foreground until SIGINT (Ctrl-C), SIGTERM or
     an IPC stop request. Other local processes reach it through the Unix
-    socket (see ``kairo.ipc``).
+    socket (see ``kairo.ipc``). Without ``--cognition`` Kairo has no cognition
+    and simply sleeps between wakes.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import signal
 import sys
 from pathlib import Path
 
+from kairo.claude import ClaudeCognition
+from kairo.cognition import CognitionProvider
 from kairo.ipc import DEFAULT_SOCKET, IPCError, IPCServer
 from kairo.memory import Memory
 from kairo.runtime import Runtime
@@ -37,22 +40,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--socket", type=Path, default=DEFAULT_SOCKET,
                         help="with --run: Unix socket for local IPC "
                              "(default: $KAIRO_SOCKET or %(default)s)")
+    parser.add_argument("--cognition", choices=["none", "claude"], default="none",
+                        help="cognition provider (default: none)")
+    parser.add_argument("--model", help="with --cognition claude: model alias or name "
+                                        "(default: the Claude CLI's default)")
+    parser.add_argument("--cognition-timeout", type=float, default=300.0, metavar="SECONDS",
+                        help="with --cognition claude: max seconds per decision "
+                             "(default: %(default)s)")
     args = parser.parse_args(argv)
     if args.reassess < 0:
         parser.error("--reassess must be >= 0")
+    if args.cognition_timeout <= 0:
+        parser.error("--cognition-timeout must be > 0")
+
+    cognition: CognitionProvider | None = None
+    if args.cognition == "claude":
+        cognition = ClaudeCognition(model=args.model, timeout=args.cognition_timeout,
+                                    workdir=args.db.parent)
 
     memory = Memory(args.db)
     try:
         if args.run:
-            return _run(memory, args.socket, args.reassess or None)
-        return _once(memory, args.db)
+            return _run(memory, args.socket, args.reassess or None, cognition)
+        return _once(memory, args.db, cognition)
     finally:
         memory.close()
 
 
-def _run(memory: Memory, socket_path: Path, reassess_after: float | None) -> int:
+def _run(memory: Memory, socket_path: Path, reassess_after: float | None,
+         cognition: CognitionProvider | None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    runtime = Runtime(memory, reassess_after=reassess_after)
+    runtime = Runtime(memory, cognition=cognition, reassess_after=reassess_after)
     server = IPCServer(runtime, socket_path)
     try:
         server.start()
@@ -70,8 +88,8 @@ def _run(memory: Memory, socket_path: Path, reassess_after: float | None) -> int
     return 0
 
 
-def _once(memory: Memory, db: Path) -> int:
-    runtime = Runtime(memory)
+def _once(memory: Memory, db: Path, cognition: CognitionProvider | None) -> int:
+    runtime = Runtime(memory, cognition=cognition)
     runtime.start()
     runtime.cycle()
     print(json.dumps({"memory": str(db), **runtime.status()}, indent=2))
