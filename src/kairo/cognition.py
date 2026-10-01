@@ -70,6 +70,9 @@ class Context:
     # Each open item's attempt log (compact summaries, oldest first, up to the
     # ledger's scan limit), from which recovery facts are derived.
     work_attempt_log: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # The derived implementation catalog (kairo.implementations): metadata and
+    # guidance of the packages the operator configured.
+    implementations: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

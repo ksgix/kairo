@@ -26,6 +26,7 @@ orchestrator, a task manager or a project manager.
 | `work.py` | Ongoing work: pursuits carried across cycles, with states, strategy revisions and runtime-validated changes |
 | `todo.py` | `TodoItem`: operational notes. They do not drive the runtime; an empty list does not mean idle. |
 | `chat.py` | `Message` / `Chat`: persisted human ⇄ Kairo messages. A message wakes a sleeping runtime. |
+| `implementations.py` | Implementation packages: manifest validation, content digest, the derived catalog |
 | `ipc.py` | Local Unix-socket IPC: lets other processes reach a running Kairo (`status`, `message`, `wake`, `stop`) |
 
 ## Continuous operation
@@ -115,6 +116,39 @@ Kairo's cognition layer (`Cognition`, in `cognition.py`) asks providers for each
   - **Limit:** an action can still reach a credential file indirectly. Its token values are then redacted from output, but not if the output is transformed (for example, encoded). Real isolation would need actions to run as a different OS user than the one holding provider credentials.
 - **Adding a provider** means adding an adapter (Kairo's instructions, situation and schema come from `instructions.cognition_request`) and one entry in `registry.PROVIDERS`. The runtime doesn't change.
 
+## Implementations
+
+An implementation is a local package that gives Kairo capability in a domain: guidance, tools, checks and any supporting files. It is **inert**. Nothing in it runs because it exists, and it has no goals, work, memory, hooks, schedules or background processes. **Kairo decides; implementations enable.**
+
+```
+<implementations-dir>/            default: <directory of --db>/implementations
+  onec/                           directory name == manifest id
+    implementation.json           the only required file
+    GUIDANCE.md, tools/, checks/  optional, any layout
+```
+
+- **Manifest (JSON):**
+  - required: `"kairo_implementation": 1`, `id`, `description`;
+  - optional: `version` (a label only), `guidance`, `requires.commands`, `env` (names, each `{"secret": bool}`), `tools`, `checks`.
+  - Unknown fields are rejected. Every path must stay inside the package, including through symlinks. The manifest declares what a package offers and needs; it grants nothing.
+- **Enablement** is configuration: `--implementations onec,web`, or `all` (default `none`), plus `--implementations-dir`. The catalog is derived from disk each time (`available`, `disabled`, `unmet_requirements`, `broken`, `missing`). There is no registry.
+- **Tools are ordinary actions.** Each tool becomes `impl.<id>.<tool>`, and declared checks become `impl.<id>.check` (with `{"name": ...}`). They're listed only while the package is available, and pass through the same parsing, repetition rule, execution, verification and logging as every other action.
+  - **Parameters:** validated against a strict JSON Schema subset (an object of string, integer, number, boolean or string-array properties, enums, `required`, `additionalProperties: false`), then passed as JSON on stdin, never on the command line.
+  - **Execution:** from the package directory, with no shell, a timeout, and capped, redacted output.
+  - **Verification:** a tool's optional `verify` command reads `{"params", "result"}`; exit 0 means success, 1 failure, anything else unverifiable. A check's exit code is its verdict.
+- **Provenance:** every implementation action records `{"implementation": {"id", "digest"}}`. The digest is a SHA-256 of the package content, so history shows exactly which content ran, even after the package changes or is removed.
+- **Guidance** (`GUIDANCE.md`) is shown to cognition as labelled, untrusted data in `capabilities.implementations`. Entries are in id order, at most 30, with at most 2,000 characters of guidance each and 8,000 in total; omissions are marked. It is never part of Kairo's instructions and cannot change Kairo's rules or grant capabilities.
+- **Secrets:** declared secret variables reach only that package's own tools. Providers' credentials never reach a package, a package can't claim them, and no package ever gets another's secrets; `process.run` gets none of them. Their values are always redacted.
+- **Not provided:**
+  - dependency installation (requirements are only detected);
+  - dependencies between implementations;
+  - downloads or a registry;
+  - signing;
+  - an on-demand `describe` action or any general file-reading tool.
+- **Not a sandbox.** Tools run as Kairo's OS user, like `process.run`: they can read and write what Kairo can, use the network and start processes.
+- **Process groups:** every action (`process.run` and implementation tools) runs in its own process group, and the whole group is killed when the action ends or times out. A process that deliberately leaves its group can still escape. Separate OS users, protected write paths and cgroups belong to production hardening.
+- **Phase 9:** packages are plain files, so later self-maintenance can change them through ordinary work, actions and checks, with the digest showing what changed.
+
 ## Situation model
 
 `Runtime.context()` gathers runtime state; `situation.build_situation()` turns it into what cognition sees each cycle. The situation is derived, never stored, so the runtime's records stay the only source of truth. It is plain data and does not depend on any provider.
@@ -130,7 +164,7 @@ Kairo's cognition layer (`Cognition`, in `cognition.py`) asks providers for each
 | `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …) and output, and chat |
 | `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, the open to-do count |
 | `knowledge` | Empty for now: the place where a future knowledge store plugs in |
-| `capabilities` | The actions the runtime can really execute, and whether each is verified automatically |
+| `capabilities` | The actions the runtime can really execute (including available implementation tools), whether each is verified automatically, and the bounded implementation catalog with guidance |
 | `context` | Limits, redaction and truncation counts, what was trimmed, and anything unavailable |
 
 - **Provenance:** every section names its source, and times carry `age_seconds`. Cognition's own earlier assessments are labelled as interpretation, not fact. Missing data is shown as missing (`"unknown"`, `null`) and never invented.

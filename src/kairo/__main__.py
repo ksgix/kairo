@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 
 from kairo.cognition import Cognition
+from kairo.environment import Environment
+from kairo.implementations import ID, Implementations
 from kairo.registry import PROVIDERS, build_cognition
 from kairo.ipc import DEFAULT_SOCKET, IPCError, IPCServer
 from kairo.memory import Memory
@@ -55,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider-opt", action="append", default=[], metavar="ID.KEY=VALUE",
                         help="a provider option, e.g. claude@haiku.model=haiku (repeatable; "
                              "never credentials)")
+    parser.add_argument("--implementations", default="none", metavar="IDS",
+                        help="implementation packages to enable: comma-separated ids, 'all' or "
+                             "'none' (default: none)")
+    parser.add_argument("--implementations-dir", type=Path, metavar="PATH",
+                        help="where implementation packages live "
+                             "(default: <directory of --db>/implementations)")
     parser.add_argument("--model", help="shortcut: model for every claude provider "
                                         "(default: the Claude CLI's default)")
     parser.add_argument("--cognition-timeout", type=float, default=300.0, metavar="SECONDS",
@@ -74,24 +82,32 @@ def main(argv: list[str] | None = None) -> int:
                                     defaults={"claude": claude_defaults}, workdir=args.db.parent)
     except ValueError as exc:
         parser.error(str(exc))
+    enabled: str | set[str] = "all" if args.implementations == "all" else set()
+    if args.implementations not in ("all", "none"):
+        enabled = {i.strip() for i in args.implementations.split(",")}
+        if bad := sorted(i for i in enabled if not ID.match(i)):
+            parser.error(f"invalid implementation id(s): {bad}")
+    environment = Environment(Implementations(
+        args.implementations_dir or args.db.parent / "implementations", enabled))
 
     memory = Memory(args.db)
     try:
         if args.situation:
-            runtime = Runtime(memory, cognition=cognition, reassess_after=args.reassess or None)
+            runtime = Runtime(memory, environment, cognition=cognition,
+                              reassess_after=args.reassess or None)
             print(render_situation(build_situation(runtime.context())))
             return 0
         if args.run:
-            return _run(memory, args.socket, args.reassess or None, cognition)
-        return _once(memory, args.db, cognition)
+            return _run(memory, args.socket, args.reassess or None, cognition, environment)
+        return _once(memory, args.db, cognition, environment)
     finally:
         memory.close()
 
 
 def _run(memory: Memory, socket_path: Path, reassess_after: float | None,
-         cognition: Cognition | None) -> int:
+         cognition: Cognition | None, environment: Environment) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    runtime = Runtime(memory, cognition=cognition, reassess_after=reassess_after)
+    runtime = Runtime(memory, environment, cognition=cognition, reassess_after=reassess_after)
     server = IPCServer(runtime, socket_path)
     try:
         server.start()
@@ -109,8 +125,9 @@ def _run(memory: Memory, socket_path: Path, reassess_after: float | None,
     return 0
 
 
-def _once(memory: Memory, db: Path, cognition: Cognition | None) -> int:
-    runtime = Runtime(memory, cognition=cognition)
+def _once(memory: Memory, db: Path, cognition: Cognition | None,
+          environment: Environment) -> int:
+    runtime = Runtime(memory, environment, cognition=cognition)
     runtime.start()
     runtime.cycle()
     print(json.dumps({"memory": str(db), **runtime.status()}, indent=2))

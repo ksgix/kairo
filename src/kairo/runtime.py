@@ -240,6 +240,11 @@ class Runtime:
             **snapshot,
             "directives": len(self.directives.active()),
             "open_todo": len(self.todo.open()),
+            # Configured implementations, derived from the filesystem (no guidance).
+            "implementations": [
+                {"id": i["id"], "state": i["state"], "reason": i["reason"],
+                 "digest": (i.get("digest") or "")[:12] or None, "tools": len(i.get("tools") or [])}
+                for i in self._implementations_view()],
             # The configured provider order (configuration, comma-separated).
             "cognition": ",".join(cognition.names) if cognition else None,
             # Which provider made the last cycle's decision, and why it was asked.
@@ -313,7 +318,7 @@ class Runtime:
                 "cycles_this_process": self._cycles,
                 "previous_process": self.previous,
                 "default_reassess_after": self.reassess_after,
-                "verifiers": sorted(self.verifiers),
+                "verifiers": sorted(set(self.verifiers) | self._environment_verified()),
             }
         try:
             observation = self.environment.observe()
@@ -349,9 +354,22 @@ class Runtime:
                     for kind in ("directive", "todo", "message", "action", "cycle", "work")},
             previous_observation=self.memory.get("runtime", "last_cycle"),
             **read("work", self._gather_work, {}),
+            implementations=read("implementations", self._implementations_view, []),
         )
         runtime["unreadable_records"] = unreadable
         return context
+
+    def _implementations_view(self) -> list[dict[str, Any]]:
+        view = getattr(self.environment, "implementations_view", None)
+        return view() if view else []
+
+    def _environment_verified(self) -> set[str]:
+        kinds = getattr(self.environment, "verified_kinds", None)
+        try:
+            return set(kinds()) if kinds else set()
+        except Exception:  # an unreadable catalog must not stop context gathering
+            log.warning("could not read implementation verifiers")
+            return set()
 
     def _gather_work(self) -> dict[str, Any]:
         records = [r for r in self.memory.all("work") if isinstance(r, dict)]
@@ -486,6 +504,9 @@ class Runtime:
         if action.work_id is not None:  # which strategy of that work this attempt belongs to
             work = self.work.get(action.work_id)
             record["strategy_revision"] = work.strategy_revision if work else None
+        provenance = getattr(self.environment, "provenance", None)
+        if provenance and (which := provenance(action)):  # implementation content to be run
+            record["implementation"] = which
         self.memory.put("action", action.id, redact(record, limit=STORED_STRING_LIMIT))
         # Neither a bad action nor a faulty verifier may take the runtime down.
         try:
@@ -495,12 +516,17 @@ class Runtime:
             result = ActionResult(action.id, executed=False, error=f"executor raised: {exc!r}",
                                   failure="executor_error")
         try:
-            verification = verify(action, result, self.verifiers.get(action.kind))
+            verifier = self.verifiers.get(action.kind)
+            if verifier is None and hasattr(self.environment, "verifier"):
+                verifier = self.environment.verifier(action.kind)  # e.g. an implementation's
+            verification = verify(action, result, verifier)
         except Exception as exc:
             log.exception("verifying action %s failed", action.id)
             verification = Verification(Outcome.UNVERIFIABLE, f"verifier raised: {exc!r}")
-        record.update(status="finished", finished_at=time.time(),
-                      result=dataclasses.asdict(result),
+        result_record = dataclasses.asdict(result)
+        if ran := result_record.pop("implementation", None):  # what actually ran
+            record["implementation"] = ran
+        record.update(status="finished", finished_at=time.time(), result=result_record,
                       verification=dataclasses.asdict(verification))
         self.memory.put("action", action.id, redact(record, limit=STORED_STRING_LIMIT))
         return Step(action, result, verification)

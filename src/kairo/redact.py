@@ -19,16 +19,28 @@ MIN_SECRET_LENGTH = 8  # shorter values are too likely to match ordinary text
 MARKER = "[redacted]"
 FILE_SECRET_LENGTH = 20  # strings at least this long in a credential file are treated as secrets
 
-# Provider credentials, declared by the providers in use: environment variable
-# names (secret whatever they are called) and credential files. Their values are
-# always redacted, and they are kept away from actions (see scrubbed_env).
+# Credentials declared by cognition providers and implementations: environment
+# variable names (secret whatever they are called) and credential files. Their
+# values are always redacted, and kept away from processes that do not own them
+# (see scrubbed_env). Each name has one owner; a provider's claim always wins,
+# so no implementation can claim a provider's credential.
+PROVIDER = "provider"
 _PROTECTED_ENV: set[str] = set()
+_OWNERS: dict[str, str] = {}
 _PROTECTED_FILES: set[str] = set()
 _file_cache: dict[str, tuple[float, frozenset[str]]] = {}
 
 
-def protect_env(names: Any) -> None:
-    _PROTECTED_ENV.update(n for n in names if isinstance(n, str) and n)
+def protect_env(names: Any, owner: str = PROVIDER) -> None:
+    for name in names:
+        if isinstance(name, str) and name:
+            _PROTECTED_ENV.add(name)
+            if owner == PROVIDER or name not in _OWNERS:
+                _OWNERS[name] = owner
+
+
+def env_owner(name: str) -> str | None:
+    return _OWNERS.get(name)
 
 
 def protect_files(paths: Any) -> None:

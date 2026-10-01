@@ -46,6 +46,8 @@ class ActionResult:
     error: str | None = None
     # When not executed: one of FAILURE_KINDS. Set by the runtime only.
     failure: str | None = None
+    # For an implementation action: {"id", "digest"} of the package content run.
+    implementation: dict[str, str] | None = None
 
 
 # Derived action states, grouped by what they establish.
