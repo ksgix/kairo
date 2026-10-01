@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from kairo import deploy
 from kairo.actions import FAILED, Action, ActionResult, action_state, attempt_identity, failure_of
 from kairo.chat import Chat, Message, Sender
 from kairo.cognition import Cognition, CognitionProvider, Context, as_cognition
@@ -37,6 +38,12 @@ from kairo.work import ATTEMPT_SCAN, CLOSED, OPEN, WorkError, WorkLedger, WorkSt
 log = logging.getLogger("kairo")
 
 STORED_STRING_LIMIT = 16_000  # characters per string in persisted action records
+RECENT_DEPLOYMENTS = 5        # deployments shown in the code context
+# Cognition failures that mean the provider answered but this code could not use
+# the answer (Kairo's own request, parsing or adapter is broken). A just-deployed
+# release that hits one before confirming itself exits so the supervisor can fall
+# back; external failures (unavailable, timeout, auth, rate limit) do not count.
+PROBATION_FAILURES = frozenset({"invalid_output", "invalid_decision", "provider_error"})
 
 
 class State(StrEnum):
@@ -108,6 +115,13 @@ class Runtime:
         self._since: float | None = None  # when the current state began
         self._process_started_at: float | None = None
         self._cycles = 0  # cycles completed by this process
+        self._stop_reason = "stopped"
+        # How the process should end: 0 normally, deploy.RESTART_EXIT after a
+        # deployment switched releases, deploy.PROBATION_EXIT if a just-deployed
+        # release proved unusable before confirming itself.
+        self.exit_code = 0
+        self._restart_for: str | None = None  # the deploy action that requested a restart
+        self._awaiting_deploy: str | None = None  # our own deployment, not yet confirmed
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -122,6 +136,7 @@ class Runtime:
             self.identity["starts"] = (starts if isinstance(starts, int) else 0) + 1
             self.memory.put("runtime", "identity", self.identity)
             self._recover_interrupted_actions()
+            self._reconcile_deployments()
 
     def _start_reason(self) -> str:
         if self.state is State.STOPPED:
@@ -130,6 +145,9 @@ class Runtime:
         if previous is None:
             return "first start"
         if previous == State.STOPPED:
+            restart_for = (self.previous or {}).get("restart_for")
+            if restart_for:
+                return f"restarted after deployment {restart_for}"
             return "started after clean stop"
         return f"recovered: previous process ended while {previous}"
 
@@ -143,6 +161,98 @@ class Runtime:
                 self.memory.put("action", record["id"], record)
                 log.warning("action %s (%s) was interrupted", record["id"], record.get("kind"))
 
+    # -- deployment (kairo.deploy) --------------------------------------------
+
+    def _deployment(self) -> Any:
+        return getattr(self.environment, "deployment", None)
+
+    def _reconcile_deployments(self) -> None:
+        """At start: settle deployments the previous process left awaiting
+        confirmation. Only this process can tell whether it is running the
+        deployed revision. If it is, its confirmation is still to come (first
+        usable cycle); if not, the candidate did not stay up (or was replaced),
+        and the deployment failed."""
+        deployment = self._deployment()
+        if deployment is None:
+            return
+        pending = [r for r in self.memory.recent_where("action", "kind", deploy.KIND, 50)
+                   if isinstance(r, dict) and deploy.awaiting_confirmation(r)]
+        running = deployment.running_revision
+        for record in pending:
+            target = (record.get("result") or {}).get("output", {}).get("to")
+            if record is pending[-1] and running is not None and running == target:
+                self._awaiting_deploy = record["id"]
+                self._note_deploy(record, "successor_started", {
+                    "revision": running, "process_started_at": self._process_started_at,
+                    "starts": self.identity.get("starts")})
+                continue
+            detail = (f"the restarted runtime is running {running or 'no release'}, not "
+                      f"{target}: the candidate did not stay up or was replaced"
+                      if record is pending[-1] else "superseded by a later deployment")
+            self._settle_deploy(record, Outcome.FAILURE, detail,
+                                {"stage": "confirmation", "running": running, "target": target})
+            log.warning("deployment %s failed: %s", record.get("id"), detail)
+
+    def _note_deploy(self, record: dict[str, Any], key: str, value: Any) -> None:
+        verification = dict(record.get("verification") or {})
+        evidence = dict(verification.get("evidence") or {})
+        evidence[key] = value
+        verification["evidence"] = evidence
+        record["verification"] = verification
+        self.memory.put("action", record["id"], redact(record, limit=STORED_STRING_LIMIT))
+
+    def _settle_deploy(self, record: dict[str, Any], outcome: Any, detail: str,
+                       evidence: dict[str, Any]) -> None:
+        previous = (record.get("verification") or {}).get("evidence") or {}
+        record["verification"] = {
+            "outcome": outcome, "detail": detail,
+            "evidence": {**{k: v for k, v in previous.items() if k != "awaiting"}, **evidence,
+                         "settled_at": time.time()}}
+        self.memory.put("action", record["id"], redact(record, limit=STORED_STRING_LIMIT))
+
+    def _probation(self, cognition: dict[str, Any]) -> None:
+        """After each cycle of a process that is the unconfirmed target of a
+        deployment: confirm it once the full lifecycle path worked (a usable
+        decision, or a completed cycle without cognition), or end the process if
+        its own code made cognition unusable."""
+        action_id = self._awaiting_deploy
+        if action_id is None:
+            return
+        record = self.memory.get("action", action_id)
+        if not isinstance(record, dict) or not deploy.awaiting_confirmation(record):
+            self._awaiting_deploy = None
+            return
+        deployment = self._deployment()
+        result = cognition.get("result")
+        if result in ("decided", "none"):
+            self._settle_deploy(record, Outcome.SUCCESS,
+                                f"confirmed by the restarted runtime: running "
+                                f"{deployment.running_revision}", {
+                                    "stage": "confirmation",
+                                    "revision": deployment.running_revision,
+                                    "digest": deploy.content_digest(deployment.running),
+                                    "process_started_at": self._process_started_at,
+                                    "cycle_at": time.time(), "cognition": result})
+            self._awaiting_deploy = None
+            log.info("deployment %s confirmed", action_id)
+        elif result == "failed" and cognition.get("failure") in PROBATION_FAILURES:
+            self._note_deploy(record, "probation_failure", {
+                "failure": cognition.get("failure"), "at": time.time(),
+                "process_started_at": self._process_started_at})
+            log.error("deployed release unusable (%s); exiting for the supervisor",
+                      cognition.get("failure"))
+            self.exit_code = deploy.PROBATION_EXIT
+            self._stop_reason = f"probation failed: cognition {cognition.get('failure')}"
+            self.request_stop()
+
+    def _request_restart(self, action_id: str) -> None:
+        """A deployment switched releases. Take on nothing new, let the cycle
+        persist, stop, and exit with RESTART_EXIT so the supervisor starts it."""
+        self._restart_for = action_id
+        self.exit_code = deploy.RESTART_EXIT
+        self._stop_reason = f"restart requested by deployment {action_id}"
+        self.request_stop()
+
     def stop(self) -> None:
         """Stop the runtime. If ``run_forever`` is active this only requests
         the stop; the loop finishes its current step and stops cleanly."""
@@ -150,7 +260,11 @@ class Runtime:
             if self._running:
                 self.request_stop()
             else:
-                self._transition({State.AWAKE, State.SLEEPING}, State.STOPPED, "stopped")
+                self._transition({State.AWAKE, State.SLEEPING}, State.STOPPED, self._stop_reason,
+                                 **self._stop_extra())
+
+    def _stop_extra(self) -> dict[str, Any]:
+        return {"restart_for": self._restart_for} if self._restart_for else {}
 
     def request_stop(self) -> None:
         """Ask a running loop to stop. Only sets a flag, so it is safe to call
@@ -275,7 +389,8 @@ class Runtime:
                 self._running = False
                 self._stop_requested = False
                 if self.state in (State.AWAKE, State.SLEEPING):
-                    self._transition({self.state}, State.STOPPED, "stopped")
+                    self._transition({self.state}, State.STOPPED, self._stop_reason,
+                                     **self._stop_extra())
 
     def _sleep_until_woken(self) -> None:
         with self._cond:
@@ -355,9 +470,39 @@ class Runtime:
             previous_observation=self.memory.get("runtime", "last_cycle"),
             **read("work", self._gather_work, {}),
             implementations=read("implementations", self._implementations_view, []),
+            code=read("code", self._gather_code, {}),
         )
         runtime["unreadable_records"] = unreadable
         return context
+
+    def _gather_code(self) -> dict[str, Any]:
+        """Runtime facts about Kairo's own code, when deployment is configured:
+        the running release (authoritative), the release links, the development
+        repository, and the latest deployments with their derived states."""
+        code_facts = getattr(self.environment, "code_facts", None)
+        facts = code_facts() if code_facts else {}
+        if not facts:
+            return {}
+        deployments = []
+        latest_for_running = None
+        for r in self.memory.recent_where("action", "kind", deploy.KIND, RECENT_DEPLOYMENTS):
+            output = (r.get("result") or {}).get("output") or {}
+            evidence = (r.get("verification") or {}).get("evidence") or {}
+            deployments.append({"action_id": r.get("id"), "from": output.get("from"),
+                                "to": output.get("to"), "state": action_state(r),
+                                "stage": evidence.get("stage") or output.get("stage"),
+                                "at": r.get("finished_at") or r.get("started_at")})
+            if output.get("to") == (facts.get("running") or {}).get("revision"):
+                latest_for_running = deployments[-1]
+        running = facts.get("running") or {}
+        if running.get("revision"):
+            running["since"] = self._process_started_at
+            running["status"] = (
+                "operator_selected" if latest_for_running is None
+                else {"verified_successful": "confirmed"}.get(latest_for_running["state"],
+                                                              latest_for_running["state"]))
+        facts["deployments"] = deployments
+        return facts
 
     def _implementations_view(self) -> list[dict[str, Any]]:
         view = getattr(self.environment, "implementations_view", None)
@@ -396,6 +541,8 @@ class Runtime:
 
         context = self.context()
         steps, note, cognition, sleep_reason, wake_after = self._decide_and_act(context)
+        if self._restart_for is not None:  # a deployment switched releases: no sleep, exit
+            sleep_reason = None
         summary = {
             "at": time.time(),
             "wake_reason": context.wake_reason,
@@ -413,6 +560,7 @@ class Runtime:
             **summary, "observation": context.environment,
             "observed_at": context.runtime["now"]}, limit=1000))
         self._cycles += 1
+        self._probation(cognition)
         if sleep_reason is not None:
             self.sleep(sleep_reason, wake_after)
         return CycleReport(self.state, steps, note=note, cognition=cognition)
@@ -529,6 +677,9 @@ class Runtime:
         record.update(status="finished", finished_at=time.time(), result=result_record,
                       verification=dataclasses.asdict(verification))
         self.memory.put("action", action.id, redact(record, limit=STORED_STRING_LIMIT))
+        # Only after the record is durable: a restart can never orphan the deploy.
+        if result.restart and action.kind == deploy.KIND:
+            self._request_restart(action.id)
         return Step(action, result, verification)
 
 

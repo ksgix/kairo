@@ -29,7 +29,7 @@ from enum import StrEnum
 from typing import Any
 
 from kairo.actions import FAILED, action_state, attempt_identity
-from kairo.memory import Collection, Memory
+from kairo.memory import Collection, Memory, from_record
 from kairo.redact import redact
 
 
@@ -110,6 +110,16 @@ class Work:
     strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
 
+# Fields whose bad values the work code and the situation already treat as unknown
+# (times, logs, completion data): a bad value there is shown, not a corrupt record.
+LENIENT = frozenset({"understanding_at", "strategy_log", "waiting_until", "history", "evidence",
+                     "completion_basis", "created_at", "updated_at", "state_since"})
+
+
+def work_from_record(data: Any) -> Work:
+    return from_record(Work, data, LENIENT)
+
+
 class WorkError(ValueError):
     """A work request the runtime refuses. The message says why."""
 
@@ -128,13 +138,17 @@ class WorkLedger(Collection[Work]):
         super().__init__(memory, "work", Work)
         self._memory = memory
 
+    def get(self, id: str) -> Work | None:
+        data = self._memory.get("work", id)
+        return work_from_record(data) if data is not None else None
+
     def all(self) -> list[Work]:
         """Readable work records. A corrupt record is skipped here (the situation
         reports it); it must not stop other work from being created or changed."""
         items = []
         for data in self._memory.all("work"):
             try:
-                items.append(Work(**data))
+                items.append(work_from_record(data))
             except (TypeError, ValueError):
                 continue
         return items
@@ -369,7 +383,7 @@ def _text(req: dict[str, Any], name: str, required: bool = False) -> str:
 
 def _clean(work: Work) -> Work:
     """Cognition's text is untrusted: redact secret values before persisting."""
-    return Work(**redact(dataclasses.asdict(work)))
+    return work_from_record(redact(dataclasses.asdict(work)))
 
 
 def _normalise(text: str) -> str:

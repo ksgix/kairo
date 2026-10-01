@@ -480,7 +480,7 @@ class RobustnessTest(SituationCase):
         rt.memory.put("action", "bad", {"id": "bad", "result": "garbage", "verification": 5})
         rt.memory.put("cycle", "bad", {"cognition": ["not", "a", "dict"], "at": "yesterday"})
         rt.memory.put("message", "bad", {"no": "fields"})
-        rt.memory.put("todo", "bad", {"description": "x", "unexpected": True})
+        rt.memory.put("todo", "bad", {"description": 5})  # known field, wrong type
         rt.start()
         with self.assertLogs("kairo", "WARNING"):
             report = rt.cycle()

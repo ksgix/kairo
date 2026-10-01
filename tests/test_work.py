@@ -402,8 +402,9 @@ class RobustnessTest(WorkCase):
         cognition = plan(Decision(work=[set_state("broken", "completed", "x", evidence=["a"]),
                                         create("new", "Still possible")], sleep=True))
         rt = self.runtime(cognition)
-        rt.memory.put("work", "broken", {"id": "broken", "state": "active", "objective": "x",
-                                         "why": "y", "unexpected_field": 1})
+        # A known field of the wrong type is corruption (an unknown field is not: Phase 9).
+        rt.memory.put("work", "broken", {"id": "broken", "state": "active", "objective": 5,
+                                         "why": "y"})
         rt.memory.put("work", "weird", {"id": "weird", "state": "sideways"})
         rt.memory.put("work", "nulls", {"id": "nulls", "state": "waiting", "waiting_until": "soon"})
         with self.assertLogs("kairo", "WARNING"):

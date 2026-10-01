@@ -1,0 +1,7 @@
+# Started by kairo.service's OnFailure= when the selected release cannot stay up.
+[Unit]
+Description=Kairo fallback: select the previous release once
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/kairo-fallback /var/lib/kairo/deploy kairo.service

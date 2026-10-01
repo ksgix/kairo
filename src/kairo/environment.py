@@ -19,6 +19,7 @@ import tempfile
 import time
 from typing import Any
 
+from kairo import deploy
 from kairo.actions import Action, ActionResult
 from kairo.implementations import (
     PREFIX, ImplementationError, Implementations, Operation, Package, check_action_params,
@@ -55,16 +56,26 @@ ACTIONS: dict[str, dict[str, Any]] = {
 
 
 class Environment:
-    def __init__(self, implementations: Implementations | None = None) -> None:
+    def __init__(self, implementations: Implementations | None = None,
+                 deployment: deploy.Deployment | None = None) -> None:
         self.implementations = implementations
+        # Configured only for a supervised release layout (see kairo.deploy).
+        self.deployment = deployment
 
     def actions(self) -> dict[str, dict[str, Any]]:
-        """The structured actions this environment can execute: the core ones,
-        plus the tools and checks of available implementations."""
+        """The structured actions this environment can execute: the core ones
+        (runtime.deploy only when deployment is configured), plus the tools and
+        checks of available implementations."""
+        core = {**ACTIONS, deploy.KIND: deploy.ACTION} \
+            if getattr(self, "deployment", None) is not None else ACTIONS
         impls = getattr(self, "implementations", None)
         if impls is None:
-            return ACTIONS
-        return {**ACTIONS, **impls.actions(ACTIONS)}
+            return core
+        return {**core, **impls.actions(core)}
+
+    def code_facts(self) -> dict[str, Any]:
+        deployment = getattr(self, "deployment", None)
+        return deployment.facts() if deployment is not None else {}
 
     def implementations_view(self) -> list[dict[str, Any]]:
         impls = getattr(self, "implementations", None)
@@ -80,7 +91,10 @@ class Environment:
 
     def verifier(self, kind: str) -> Any:
         """The verifier this environment supplies for one of its action kinds:
-        a tool's declared verify command, or a check's own verdict."""
+        a tool's declared verify command, a check's own verdict, or, for a
+        deployment, the wait for the restarted runtime's confirmation."""
+        if kind == deploy.KIND and getattr(self, "deployment", None) is not None:
+            return deploy.AwaitSuccessor()
         try:
             package, tool = self._resolve(kind)
         except ImplementationError:
@@ -112,6 +126,8 @@ class Environment:
         match action.kind:
             case "process.run":
                 return self._run_process(action)
+            case deploy.KIND if getattr(self, "deployment", None) is not None:
+                return self.deployment.deploy(action)  # type: ignore[union-attr]
             case kind if kind.startswith(PREFIX):
                 return self._run_implementation(action)
             case _:

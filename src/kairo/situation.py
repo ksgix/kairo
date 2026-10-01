@@ -52,6 +52,7 @@ class Limits:
     work_revisions: int = 5    # strategy revisions summarised per open work item
     failure_detail: int = 300  # characters of error / stderr shown for a failure
     implementations: int = 30  # implementation catalog entries (ordered by id)
+    deployments: int = 5       # recent deployments in kairo.code
     guidance_each: int = 2000  # characters of one implementation's guidance
     guidance_total: int = 8000  # characters of guidance across all implementations
     budget: int = 60_000       # characters of rendered JSON; oldest history goes first
@@ -90,6 +91,8 @@ def build_situation(context: Context, limits: Limits = LIMITS) -> dict[str, Any]
         "knowledge": section("knowledge", lambda: _knowledge(context, now)),
         "capabilities": section("capabilities", lambda: _capabilities(context, limits)),
     }
+    if context.code and isinstance(situation["kairo"], dict):  # only when deployment is configured
+        situation["kairo"]["code"] = section("kairo.code", lambda: _code(context, now, limits))
 
     # Round-trip through JSON so only plain data survives. Anything else becomes
     # its type name: an object's repr could carry a secret, so it is never used.
@@ -303,7 +306,8 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
                  "executed_unverified (ran, exit 0, outcome not checked), exited_nonzero (ran, "
                  "not verified, non-zero exit), failed_to_execute, interrupted (cut off by a "
                  "process exit and not re-run: the runtime cannot tell whether it completed or "
-                 "what side effects it had) or in_progress. 'failure' says how it failed, as a "
+                 "what side effects it had), in_progress, or awaiting_confirmation (a deployment "
+                 "that only the restarted runtime can verify; not a success). 'failure' says how it failed, as a "
                  "runtime fact: not_found, permission_denied, timed_out, invalid_params, "
                  "os_error, executor_error, exited_nonzero or verification_failed. An exit code "
                  "is only a number; what it means is for cognition to judge. 'purpose' is "
@@ -504,6 +508,36 @@ def _work(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         "open": [_guarded(open_item, w) for w in ctx.open_work],
         "recently_closed": [closed_item(w) for w in ctx.closed_work],
         "omitted": _omitted(total, shown),
+    }
+
+
+def _code(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    """Kairo's own code, as runtime facts (kairo.deploy): which release is running
+    (authoritative; the repository's HEAD may be ahead of it), what the release
+    links select, the development repository, and recent deployments."""
+    c = ctx.code
+    running = c.get("running") or {}
+    repo = c.get("repository") or {}
+    return {
+        "source": ("runtime facts: the release this process imported at start, the release "
+                   "links, the development repository (git), and runtime.deploy action records"),
+        "meaning": ("Kairo runs an immutable release built from one commit; edits in the "
+                    "repository change nothing until committed and deployed with runtime.deploy. "
+                    "status: confirmed (the restarted runtime verified it runs the deployed "
+                    "revision), awaiting_confirmation, operator_selected (started by the operator, "
+                    "no deployment), or a failed state."),
+        "running": {"revision": running.get("revision"), "release": running.get("release"),
+                    "digest": running.get("digest"), "status": running.get("status"),
+                    "since": _when(running.get("since"), now) if running.get("since") else None,
+                    **({"note": running["note"]} if running.get("note") else {})},
+        "current_link": (c.get("current") or {}).get("revision"),
+        "previous": (c.get("previous") or {}).get("revision"),
+        "repository": {k: repo.get(k) for k in ("path", "head", "branch", "dirty_files",
+                                                 "head_is_running", "unavailable") if k in repo},
+        "recent_deployments": [
+            {"action_id": d.get("action_id"), "from": d.get("from"), "to": d.get("to"),
+             "state": d.get("state"), "stage": d.get("stage"), **_when(d.get("at"), now)}
+            for d in (c.get("deployments") or [])[-limits.deployments:]],
     }
 
 

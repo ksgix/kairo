@@ -14,7 +14,7 @@ orchestrator, a task manager or a project manager.
 | Module | Concept |
 |---|---|
 | `runtime.py` | `Runtime`: lifecycle states `created → awake ⇄ sleeping → stopped`; `cycle()` (observe → ask cognition → execute → verify → persist → maybe sleep) and `run_forever()` (continuous operation) |
-| `environment.py` | `Environment`: `observe()` describes the host; `execute(Action)` runs structured actions (currently only `process.run` with an `argv` list, never shell text) |
+| `environment.py` | `Environment`: `observe()` describes the host; `execute(Action)` runs structured actions (`process.run` with an `argv` list, never shell text; implementation tools; `runtime.deploy` when configured) |
 | `cognition.py` | `CognitionProvider` protocol: `decide(Context) -> Decision`; `Context` (the runtime state gathered each cycle); the decision JSON schema and strict decision parsing |
 | `situation.py` | The situation model: projects a `Context` into what cognition is shown (structured, bounded, redacted and deterministic) |
 | `claude.py` | `ClaudeCognition`: the first real provider, which calls the locally installed Claude Code CLI |
@@ -28,6 +28,7 @@ orchestrator, a task manager or a project manager.
 | `chat.py` | `Message` / `Chat`: persisted human ⇄ Kairo messages. A message wakes a sleeping runtime. |
 | `implementations.py` | Implementation packages: manifest validation, content digest, the derived catalog |
 | `ipc.py` | Local Unix-socket IPC: lets other processes reach a running Kairo (`status`, `message`, `wake`, `stop`) |
+| `deploy.py` | Self-deployment: immutable releases built from commits, the `runtime.deploy` action (preflight, snapshot, switch, restart) |
 
 ## Continuous operation
 
@@ -51,7 +52,7 @@ Without a cognition provider, Kairo observes, sleeps with the reason `no cogniti
 `--cognition claude` makes the local `claude` CLI Kairo's cognition. Each cycle is one headless call: `claude -p` with `--tools ""` (no tools), `--restricted`, `--strict-mcp-config` and `--no-session-persistence`.
 
 - **Input:** the situation model (see below), sent on stdin.
-- **Output:** Claude answers with JSON validated against a schema (`reason`, `actions`, `replies`, `sleep`, `wake_after`), which Kairo parses strictly into a `Decision`. Claude cannot run anything itself; it can only request `process.run` actions, which the runtime executes and records.
+- **Output:** Claude answers with JSON validated against a schema (`reason`, `actions`, `replies`, `sleep`, `wake_after`), which Kairo parses strictly into a `Decision`. Claude cannot run anything itself; it can only request structured actions from the runtime's capabilities, which the runtime executes and records.
 - **Failures:** a missing CLI, a non-zero exit, a timeout, empty or invalid output, or an invalid decision is recorded with a category. Kairo then sleeps until the next wake; the process keeps running.
 - **Authentication:** whatever the local CLI is logged in with. Kairo stores no credentials.
 - **Cycle log:** every cycle leaves a small `cycle` record with provider, result or failure category, requested action kinds, sleep choice, latency and cost.
@@ -147,7 +148,100 @@ An implementation is a local package that gives Kairo capability in a domain: gu
   - an on-demand `describe` action or any general file-reading tool.
 - **Not a sandbox.** Tools run as Kairo's OS user, like `process.run`: they can read and write what Kairo can, use the network and start processes.
 - **Process groups:** every action (`process.run` and implementation tools) runs in its own process group, and the whole group is killed when the action ends or times out. A process that deliberately leaves its group can still escape. Separate OS users, protected write paths and cgroups belong to production hardening.
-- **Phase 9:** packages are plain files, so later self-maintenance can change them through ordinary work, actions and checks, with the digest showing what changed.
+- **Maintenance:** packages are plain files read fresh for every action, so self-maintenance changes them through ordinary work, actions and checks, with no deployment or restart; the digest shows what changed.
+
+## Self-maintenance
+
+Kairo maintains its own code as **ordinary work**, for a concrete reason (an observed failure, a verified defect, a capability real work needs), never because it is idle. There is no maintenance agent, queue, scheduler or work type. Cognition inspects, edits, tests and commits Kairo's source with ordinary `process.run` actions in a **development repository**, and the existing recovery rules apply (failure facts, strategy revisions, no blind repetition). The one new action, `runtime.deploy`, is for the step those actions cannot do: making a committed revision the code Kairo runs.
+
+**Layout** (`--repository DEV --releases DIR`; deployment is off without them):
+
+| Path | Meaning |
+|---|---|
+| `DEV` | development repository: for example a git worktree of `/opt/kairo` on its own branch, so the human checkout is never touched |
+| `DIR/releases/<sha>/` | immutable release: `git archive` of one commit, read-only, never edited in place |
+| `DIR/current` | the release the supervisor starts |
+| `DIR/previous` | the release that requested the latest switch, which is the fallback target |
+| `DIR/snapshots/` | a database backup taken before each switch (a recovery artifact, never restored automatically) |
+
+The running release is never the development tree. Only committed revisions can be deployed; uncommitted or partial edits never run. The running revision is taken from the code the process actually imported, not from `HEAD`.
+
+**`runtime.deploy {revision}`** goes through the normal action path (`Runtime.act` → `Environment.execute` → action record → verification):
+
+1. Resolve the commit SHA. Names, paths and "latest" are refused.
+2. Build the release, or reuse it if it already exists.
+3. Preflight:
+   - the candidate's own full test suite is a **gate**; "no tests ran" or only skipped tests count as failure;
+   - the running release's suite is run against the candidate as **evidence** only;
+   - a **dry cycle** of the candidate runs on a copy of the database. It must start, build its context, situation and cognition request, parse decisions and complete a cycle; no provider is called and no action is executed.
+4. Snapshot the database.
+5. `previous` := the running release; `current` := the candidate. Each is an atomic rename.
+6. Request a restart.
+
+The result records each stage, the files changed, and the **trust-critical** files changed (runtime, persistence, deployment, execution, verification, cognition parsing).
+
+A failure at any stage leaves `current` unchanged, and becomes an ordinary failed attempt with its stage.
+
+**Restart:**
+- The deploy record, the cycle and the lifecycle reason are persisted first. Kairo then takes on no further actions and exits with status **75**.
+- The supervisor starts `current`.
+- A human stop still exits 0 and stays stopped.
+- IPC is unchanged.
+
+**Confirmation:**
+- Until the restarted process confirms it, the deploy action is `awaiting_confirmation`. This is indeterminate, not a success, and cannot be cited as completion evidence.
+- The new process checks that it runs the target revision, then confirms after its first usable cycle (a parsed decision, or a completed cycle without cognition). The evidence is the revision, digest, process start and cycle time, and the deploy becomes `verified_successful`.
+- If a different release is running (the candidate did not stay up), the deploy becomes `verified_failed` with stage `confirmation`.
+- **Probation:** while unconfirmed, if cognition fails because this code cannot use the provider's answer (`invalid_output`, `invalid_decision`, `provider_error`), the process exits with status 3 so the supervisor can recover. External failures (unavailable, timeout, rate limit) only delay confirmation.
+
+**Known-good:** a release that was built from a commit, passed preflight, became current, started, and confirmed itself under supervision. `previous` always qualifies, because it is the release that ran the confirmed cycle in which the deploy was decided.
+
+**Rollback:**
+- To roll back, cognition deploys the previous revision. No `git reset`, and the development tree is never changed to restore the runtime.
+- Automatic rollback exists only for one case: the new release cannot stay alive.
+
+**Supervisor and fallback** (`deploy/kairo.service`, `deploy/kairo-fallback.service`, `deploy/kairo-fallback`; templates, installed once by the operator):
+- `Restart=on-failure`, `RestartForceExitStatus=75`, `SuccessExitStatus=75`, and a start limit.
+- `RestartMode=direct` (systemd 254 or later), so `OnFailure=` runs only after a crash loop exhausts the start limit, not on every failed exit.
+- A release that keeps failing makes the unit fail, and `OnFailure=` runs the fallback.
+- The fallback (about 20 lines of `sh`) switches `current` to `previous` **once**, then starts Kairo. If there is no valid previous release, or `current` already equals `previous`, it does nothing and Kairo stays stopped.
+- It never touches the database.
+
+**One database, one runtime:** `--run`, `--once` and `--preflight` hold an exclusive `flock` on `<db>.lock` for the life of the process, so a second runtime on the same database fails at once (exit 2). The OS releases the lock when the process dies. Other databases are unaffected. `--situation` is a read-only view and does not lock.
+
+**Persistence compatibility:**
+- Records are read tolerantly: fields this code does not know (written by a newer release) are ignored, so rolling back never hides directives or work.
+- Known fields are still type-checked. A known field of the wrong type is corruption, except the fields Phase 6 already shows as unknown (times, logs, completion data).
+- An older release that rewrites a record drops the fields it does not know.
+- There are no migrations and no new record kinds or tables. Deployments live in their `runtime.deploy` action records.
+
+**Context:** when deployment is configured, the situation has a bounded `kairo.code` section of runtime facts:
+- the running revision, release, digest and status (`confirmed`, `awaiting_confirmation` or `operator_selected`);
+- the `current` and `previous` links;
+- the repository's HEAD, branch, dirty-file count and whether HEAD is running;
+- the last 5 deployments with state and stage.
+
+It contains no diffs, logs or source.
+
+**Authority and trust:**
+- Kairo keeps its broad authority over the host. The supervisor, fallback and release layout are **recovery infrastructure**, not a security boundary: they let Kairo be restarted and recovered when its own code is broken, and Kairo could still change them, though it does not do so as part of self-maintenance.
+- Preflight is judged by the old, running code, and the fallback is outside the candidate.
+- Residual risk: a sufficiently broken candidate could falsely confirm itself after the switch.
+- Passing tests show that the suite passed. They do not show that a work objective is achieved; that remains cognition's judgment over the evidence.
+
+**Install on a host** (operator, once):
+
+```sh
+sudo mkdir -p /var/lib/kairo && sudo chown kamin: /var/lib/kairo
+git -C /opt/kairo worktree add /var/lib/kairo/dev -b kairo/dev       # development worktree
+PYTHONPATH=/opt/kairo/src python3 -m kairo --init-release "$(git -C /var/lib/kairo/dev rev-parse HEAD)" \
+    --repository /var/lib/kairo/dev --releases /var/lib/kairo/deploy   # first release -> current
+sudo install -m 0644 deploy/kairo.service deploy/kairo-fallback.service /etc/systemd/system/
+sudo install -m 0755 deploy/kairo-fallback /usr/local/libexec/kairo-fallback
+sudo systemctl daemon-reload && sudo systemctl enable --now kairo.service
+```
+
+Retention of old releases and snapshots is a later housekeeping concern.
 
 ## Situation model
 
@@ -155,7 +249,7 @@ An implementation is a local package that gives Kairo capability in a domain: gu
 
 | Section | Contents |
 |---|---|
-| `kairo` | Identity, when Kairo was first created, and how many times it has started |
+| `kairo` | Identity, when Kairo was first created, how many times it has started, and (with deployment configured) `code`: the running release and recent deployments |
 | `now` | Time, lifecycle state, wake reason, current process, the previous process (and whether it ended cleanly), the previous cycle |
 | `environment` | A fresh host observation and what changed since the previous one |
 | `directives` | Active directives with age and open to-do counts, plus the number inactive |
@@ -215,14 +309,13 @@ The tests need no network, credentials or third-party packages.
 
 ## Deliberately not implemented yet
 
-- Providers other than Claude, multiple providers, and delegation between providers
-- Cognition cannot yet edit directives or to-do items; its only runtime action is `process.run`, alongside work requests
-- Work priority or focus, automatic resumption of elapsed waits, and automatic verifiers
-- A daemon/systemd service, cron or any scheduler; the only timing is one self-wake deadline
+- Delegation between providers, and providers other than Claude (the provider interface supports them)
+- Cognition editing directives or to-do items
+- Work priority or focus, and automatic resumption of elapsed waits
+- Any scheduler beyond the one self-wake deadline; nothing triggers maintenance
 - Remote access of any kind: IPC is a local Unix socket, protected only by file permissions, with no authentication
-- The full autonomous lifecycle (understand, prioritise, intend, strategise, learn, reassess)
-- Action kinds beyond `process.run`, and any concrete verifiers
-- Implementations/extensions (1C, trading, research, …) and their packaging
-- Self-modification
+- A sandbox, separate OS users, network isolation, or package signing
+- Automatic database restore, migrations, hot reload, automatic git push, and autonomous changes to the systemd unit, the fallback or OS packages
+- Release and snapshot retention
 - Dashboard, web UI, REST API
-- Memory beyond plain documents (no embeddings, ranking, consolidation or migrations)
+- Memory beyond plain documents (no embeddings, ranking or consolidation)

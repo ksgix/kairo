@@ -48,13 +48,17 @@ class ActionResult:
     failure: str | None = None
     # For an implementation action: {"id", "digest"} of the package content run.
     implementation: dict[str, str] | None = None
+    # Set only by the runtime's own deploy executor: a new release was selected, so
+    # this process must persist everything and exit for the supervisor to restart it.
+    restart: bool = False
 
 
 # Derived action states, grouped by what they establish.
 SUCCEEDED = frozenset({"verified_successful", "executed_unverified"})
 FAILED = frozenset({"failed_to_execute", "verified_failed", "exited_nonzero"})
-# The runtime cannot tell whether these completed or what side effects occurred.
-INDETERMINATE = frozenset({"interrupted", "in_progress"})
+# The runtime cannot tell whether these completed or what side effects occurred
+# (awaiting_confirmation: a deployment only the restarted runtime can verify).
+INDETERMINATE = frozenset({"interrupted", "in_progress", "awaiting_confirmation"})
 
 
 def _returncode(record: dict[str, Any]) -> Any:
@@ -68,6 +72,11 @@ def action_state(record: dict[str, Any]) -> str:
         return "interrupted"
     if status == "started":
         return "in_progress"
+    verification = record.get("verification")
+    if (isinstance(verification, dict) and verification.get("outcome") == "unverifiable"
+            and isinstance(verification.get("evidence"), dict)
+            and verification["evidence"].get("awaiting") == "successor"):
+        return "awaiting_confirmation"
     if not (record.get("result") or {}).get("executed"):
         return "failed_to_execute"
     outcome = (record.get("verification") or {}).get("outcome")

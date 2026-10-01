@@ -1,0 +1,56 @@
+# Kairo Runtime under systemd: the external supervisor for self-deployment.
+#
+# Install (operator, once; adjust paths and user to the host):
+#   sudo install -m 0644 deploy/kairo.service deploy/kairo-fallback.service /etc/systemd/system/
+#   sudo install -m 0755 deploy/kairo-fallback /usr/local/libexec/kairo-fallback
+#   sudo systemctl daemon-reload && sudo systemctl enable --now kairo.service
+#
+# Layout (see README, "Self-maintenance"):
+#   /var/lib/kairo/kairo.db        the one authoritative database (locked by the runtime)
+#   /var/lib/kairo/dev             development worktree Kairo edits and commits in
+#   /var/lib/kairo/deploy          releases/<sha>, current, previous, snapshots/
+#
+# Exit status 75: a deployment selected a new release -> restart now (not a failure).
+# Exit status 0:  a stop (systemctl stop, IPC stop, SIGTERM) -> stay stopped.
+# Anything else:  a failure -> restart; a release that keeps failing within the
+#                 start limit makes the unit fail, and OnFailure runs the fallback,
+#                 which selects the previous release once.
+#
+# RestartMode=direct (systemd >= 254) matters: with the default, every failed exit
+# passes through the "failed" state and triggers OnFailure even when Restart= is
+# about to retry, so a single transient crash of a good release would fall back.
+# A deploy restart is minutes apart (preflight runs the suite twice); a crash loop
+# (RestartSec=3) reaches the start limit in seconds.
+#
+# Kairo keeps its broad authority over this host. This unit and the fallback exist
+# so Kairo can be restarted and recovered when its own code is broken: a
+# reliability boundary, not a security boundary.
+
+[Unit]
+Description=Kairo Runtime
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=kairo-fallback.service
+
+[Service]
+Type=simple
+User=kamin
+Group=kamin
+WorkingDirectory=/var/lib/kairo
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+# The release is resolved once, at start, so the process imports one immutable release.
+ExecStart=/bin/sh -c 'release=$$(readlink -f /var/lib/kairo/deploy/current) && exec env PYTHONPATH="$$release/src" /usr/bin/python3 -m kairo --run --db /var/lib/kairo/kairo.db --socket /var/lib/kairo/kairo.sock --repository /var/lib/kairo/dev --releases /var/lib/kairo/deploy --cognition claude --provider-opt claude.executable=/home/kamin/.local/bin/claude'
+Restart=on-failure
+RestartMode=direct
+RestartSec=3
+SuccessExitStatus=75
+RestartForceExitStatus=75
+KillSignal=SIGTERM
+# A stop lets the current action finish (actions are bounded by their timeouts).
+TimeoutStopSec=600
+
+[Install]
+WantedBy=multi-user.target

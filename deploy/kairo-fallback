@@ -1,0 +1,41 @@
+#!/bin/sh
+# kairo-fallback RELEASES_DIR [UNIT]
+#
+# Run by systemd (kairo-fallback.service, via OnFailure= of kairo.service) when the
+# selected Kairo release cannot stay up. It does exactly one thing: select the
+# previous release, once, and start Kairo again. No cognition, no loop, no state
+# of its own beyond the two release links:
+#
+#   - no valid previous release        -> leave Kairo stopped
+#   - current is already previous      -> leave Kairo stopped (the fallback was used,
+#                                         or the failure is not the release's)
+#   - otherwise                        -> current := previous (atomic), start the unit
+#
+# The database is never touched: snapshots are recovery artifacts, restored only by
+# a deliberate decision. This is recovery infrastructure that works when Kairo's
+# own code is broken; it is not a security boundary (Kairo has broad authority).
+set -u
+root=${1:?usage: kairo-fallback RELEASES_DIR [UNIT]}
+unit=${2:-kairo.service}
+systemctl=${KAIRO_SYSTEMCTL:-systemctl}
+
+log() { echo "kairo-fallback: $*" >&2; }
+
+current=$(readlink "$root/current" 2>/dev/null) || current=
+previous=$(readlink "$root/previous" 2>/dev/null) || previous=
+
+if [ -z "$previous" ] || [ ! -f "$root/$previous/.kairo-release" ]; then
+    log "no valid previous release; leaving $unit stopped"
+    exit 0
+fi
+if [ "$current" = "$previous" ]; then
+    log "current is already the previous release ($previous); leaving $unit stopped"
+    exit 0
+fi
+ln -sfn "$previous" "$root/.current.fallback" && mv -Tf "$root/.current.fallback" "$root/current" || {
+    log "could not switch current to $previous; leaving $unit stopped"
+    exit 1
+}
+log "current switched from ${current:-nothing} to $previous; starting $unit"
+"$systemctl" reset-failed "$unit"
+"$systemctl" start --no-block "$unit"

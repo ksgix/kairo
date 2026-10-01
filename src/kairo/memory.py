@@ -3,14 +3,26 @@
 Memory is a small local SQLite document store: every record is a JSON
 document identified by ``(kind, id)``. It is deliberately schemaless so the
 kinds of things Kairo remembers can evolve without migrations.
+
+Records are read tolerantly: a field this code does not know (written by a newer
+release) is ignored, so rolling back to an older release never hides a whole
+record. Known fields are still type-checked; a known field of the wrong type is
+corruption. An older release that rewrites such a record drops the fields it
+does not know.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import enum
+import fcntl
+import functools
 import json
+import os
 import sqlite3
 import threading
+import types
+import typing
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -107,6 +119,89 @@ class Memory:
             self._db.close()
 
 
+class DatabaseLocked(RuntimeError):
+    """Another live Kairo runtime already owns this database."""
+
+
+def lock_database(path: str | Path) -> int:
+    """Take the exclusive runtime lock for one database: one DB, one active
+    runtime. Held (by the returned descriptor) for the rest of the process's life
+    and released by the OS when the process ends, however it ends. Per database,
+    not system-wide: other databases (tests, preflight copies) are unaffected."""
+    lock_path = f"{path}.lock"
+    Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise DatabaseLocked(f"another Kairo runtime is using {path}") from None
+    return fd
+
+
+def backup_database(source: str | Path, target: str | Path) -> None:
+    """A consistent copy of a live database (SQLite backup API), readable while
+    the owning runtime keeps writing. The copy is mode 0600."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        dst = sqlite3.connect(str(target))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
+def from_record[T](type_: type[T], data: Any, lenient: frozenset[str] = frozenset()) -> T:
+    """Build a record dataclass from stored JSON: unknown fields are ignored,
+    known fields must have their declared type (TypeError/ValueError if not),
+    except ``lenient`` ones, whose readers already handle bad values themselves
+    (showing them as unknown) and must keep doing so."""
+    if not isinstance(data, dict):
+        raise TypeError(f"{type_.__name__} record is not an object")
+    hints = _hints(type_)
+    values = {k: v for k, v in data.items() if k in hints}
+    for name, value in values.items():
+        if name not in lenient and not _conforms(value, hints.get(name, Any)):
+            raise ValueError(f"{type_.__name__}.{name} has the wrong type "
+                             f"({type(value).__name__})")
+    return type_(**values)
+
+
+@functools.cache
+def _hints(type_: type) -> dict[str, Any]:
+    """Declared field types of a record dataclass (computed once per type)."""
+    hints = typing.get_type_hints(type_)
+    return {f.name: hints.get(f.name, Any) for f in dataclasses.fields(type_)}
+
+
+def _conforms(value: Any, hint: Any) -> bool:
+    if hint is Any:
+        return True
+    origin = typing.get_origin(hint)
+    if origin in (typing.Union, types.UnionType):
+        return any(_conforms(value, h) for h in typing.get_args(hint))
+    if hint is type(None):
+        return value is None
+    if origin is not None:
+        return isinstance(value, origin)
+    if isinstance(hint, type) and issubclass(hint, enum.Enum):
+        return value in {m.value for m in hint}
+    if hint is bool:
+        return isinstance(value, bool)
+    if hint in (int, float):  # JSON numbers; a bool is not a number here
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and \
+            (hint is float or isinstance(value, int))
+    if isinstance(hint, type):
+        return isinstance(value, hint)
+    return True
+
+
 class Collection[T]:
     """Typed view over one ``kind`` of record, for dataclasses with an ``id``."""
 
@@ -121,16 +216,16 @@ class Collection[T]:
 
     def get(self, id: str) -> T | None:
         data = self._memory.get(self._kind, id)
-        return self._type(**data) if data is not None else None
+        return from_record(self._type, data) if data is not None else None
 
     def all(self) -> list[T]:
-        return [self._type(**d) for d in self._memory.all(self._kind)]
+        return [from_record(self._type, d) for d in self._memory.all(self._kind)]
 
     def count(self) -> int:
         return self._memory.count(self._kind)
 
     def recent(self, limit: int) -> list[T]:
-        return [self._type(**d) for d in self._memory.recent(self._kind, limit)]
+        return [from_record(self._type, d) for d in self._memory.recent(self._kind, limit)]
 
     def remove(self, id: str) -> bool:
         return self._memory.delete(self._kind, id)

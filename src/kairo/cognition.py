@@ -73,6 +73,10 @@ class Context:
     # The derived implementation catalog (kairo.implementations): metadata and
     # guidance of the packages the operator configured.
     implementations: list[dict[str, Any]] = field(default_factory=list)
+    # Facts about Kairo's own code when deployment is configured (kairo.deploy):
+    # the running release, the release links, the development repository and the
+    # latest deployments. Empty otherwise.
+    code: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
