@@ -79,6 +79,24 @@ The layers, from most lasting to most momentary:
 - **Retry versus new strategy:** changing the strategy gives it a new revision. Each linked action records the revision it belongs to, so a retry (same revision) is distinguishable from a changed strategy.
 - **One source of truth:** each `work` record is the only authority for that item's current state, with a short log of its own changes. Attempts are not copied into it; they are the action records that point to the work.
 
+## Failure and recovery
+
+- **Failures are runtime facts. Diagnoses are cognition's interpretation.**
+  - When an action can't be executed, the runtime records a `failure` kind taken from the actual exception: `not_found`, `permission_denied`, `timed_out`, `invalid_params`, `os_error` or `executor_error`.
+  - A command that ran but exited non-zero has state `exited_nonzero`. The exit code is only a number; the runtime never infers a cause from it (exit 127 is not "command not found").
+  - A verifier's rejection is `verification_failed`.
+  - An `interrupted` action is neither a failure nor a success: its outcome and side effects are unknown.
+- **Recovery facts per open work item**, derived from the action log, with no separate failure store:
+  - the latest failure, with a bounded error or stderr excerpt;
+  - `diagnosis_since_latest_failure`: whether the understanding changed after that failure;
+  - attempts, failures and successes for each of the last 5 strategy revisions;
+  - `repeated_identical_failures`.
+
+  The work record keeps `understanding_at` and a `strategy_log` of the last 10 strategies.
+- **No blind repetition:** an action linked to a work item is refused, not run, when it exactly repeats an attempt at that work that failed or was interrupted since the understanding last changed. The comparison uses kind and parameters in their stored, redacted form. There is no retry counter: updating the understanding, in the same decision if needed, allows the retry. Refusals appear in the next situation.
+- **Waiting deadlines:** while sleeping, Kairo also wakes at the earliest future `waiting_until` of any open work, with the wake reason `wait elapsed for work <id>`. The work stays `waiting` until cognition decides otherwise.
+- **Provider failures** are cycle-level. They are never attributed to a work item, and they leave work and its failure history untouched.
+
 ## Situation model
 
 `Runtime.context()` gathers runtime state; `situation.build_situation()` turns it into what cognition sees each cycle. The situation is derived, never stored, so the runtime's records stay the only source of truth. It is plain data and does not depend on any provider.

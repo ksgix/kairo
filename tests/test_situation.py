@@ -153,8 +153,9 @@ class HistoryTest(SituationCase):
         item = s["history"]["actions"]["items"][2]
         self.assertEqual((item["stdout"], item["returncode"], item["purpose"]), ("hello\n", 0, "test"))
         threads = s["open_threads"]
-        self.assertEqual({a["id"] for a in threads["actions_failed_or_interrupted"]},
-                         {wrong.action.id, broken.action.id})
+        self.assertEqual({a["id"]: a["failure"] for a in threads["actions_failed"]},
+                         {wrong.action.id: "verification_failed", broken.action.id: "not_found"})
+        self.assertEqual(threads["actions_outcome_unknown"], [])
         self.assertIn("not a task list", threads["meaning"])
 
     def test_interrupted_action_after_restart(self):
@@ -174,8 +175,10 @@ class HistoryTest(SituationCase):
         self.assertIs(s["now"]["previous_process"]["ended_cleanly"], False)
         [a] = s["history"]["actions"]["items"]
         self.assertEqual((a["state"], a["finished"]), ("interrupted", None))
-        self.assertEqual(s["open_threads"]["actions_failed_or_interrupted"],
-                         [{"id": "a1", "state": "interrupted"}])
+        # Interrupted is an unknown outcome, not a failure.
+        self.assertEqual(s["open_threads"]["actions_outcome_unknown"],
+                         [{"id": "a1", "state": "interrupted", "work_id": None}])
+        self.assertEqual(s["open_threads"]["actions_failed"], [])
 
     def test_failed_cycle_is_recorded_as_fact(self):
         class Failing:

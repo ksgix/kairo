@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from kairo.actions import Action, ActionResult
+from kairo.actions import FAILED, Action, ActionResult, action_state, attempt_identity, failure_of
 from kairo.chat import Chat, Message, Sender
 from kairo.cognition import CognitionError, CognitionProvider, Context, Decision
 from kairo.directives import Directives
@@ -31,7 +31,7 @@ from kairo.redact import redact
 from kairo.situation import LIMITS
 from kairo.todo import Todo
 from kairo.verification import Outcome, Verification, Verifier, verify
-from kairo.work import CLOSED, OPEN, WorkError, WorkLedger
+from kairo.work import ATTEMPT_SCAN, CLOSED, OPEN, WorkError, WorkLedger, WorkState
 
 log = logging.getLogger("kairo")
 
@@ -103,6 +103,7 @@ class Runtime:
         self._wake_pending: str | None = None
         self._wake_deadline: float | None = None  # time.monotonic() value
         self._wake_at: float | None = None  # the same deadline as wall-clock time
+        self._deadline_reason = "reassessment due"  # wake reason when the deadline passes
         self._since: float | None = None  # when the current state began
         self._process_started_at: float | None = None
         self._cycles = 0  # cycles completed by this process
@@ -159,10 +160,29 @@ class Runtime:
 
     def sleep(self, reason: str, wake_after: float | None = None) -> None:
         with self._cond:
+            now = time.time()
             delay = wake_after if wake_after is not None else self.reassess_after
-            self._wake_deadline = time.monotonic() + delay if delay is not None else None
-            self._wake_at = time.time() + delay if delay is not None else None
+            at = now + delay if delay is not None else None
+            self._deadline_reason = "reassessment due"
+            # Waiting work is reassessed when its wait runs out. Only future
+            # deadlines count: an elapsed wait is already visible to cognition.
+            waiting = self._next_wait(now)
+            if waiting is not None and (at is None or waiting[0] < at):
+                at = waiting[0]
+                self._deadline_reason = f"wait elapsed for work {waiting[1]}"
+            self._wake_deadline = time.monotonic() + (at - now) if at is not None else None
+            self._wake_at = at
             self._transition({State.AWAKE}, State.SLEEPING, reason, wake_at=self._wake_at)
+
+    def _next_wait(self, now: float) -> tuple[float, str] | None:
+        try:
+            waits = [(w.waiting_until, w.id) for w in self.work.open()
+                     if w.state == WorkState.WAITING and isinstance(w.waiting_until, (int, float))
+                     and not isinstance(w.waiting_until, bool) and w.waiting_until > now]
+        except Exception:  # unreadable work must not prevent sleeping
+            log.warning("could not read waiting work for the wake deadline")
+            return None
+        return min(waits) if waits else None
 
     def wake(self, reason: str) -> None:
         with self._cond:
@@ -256,7 +276,7 @@ class Runtime:
                     continue
                 remaining = self._wake_deadline - time.monotonic()
                 if remaining <= 0:
-                    self.wake("reassessment due")
+                    self.wake(self._deadline_reason)
                     return
                 self._cond.wait(remaining)
 
@@ -332,9 +352,15 @@ class Runtime:
                            key=lambda r: r.get("updated_at") or 0)[-LIMITS.work_open:]
         closed = sorted((r for r in records if r.get("state") in CLOSED),
                         key=lambda r: r.get("state_since") or 0)[-LIMITS.work_closed:]
-        attempts = {r["id"]: self.work.attempts(r["id"], LIMITS.work_attempts)
-                    for r in open_work if isinstance(r.get("id"), str)}
-        return {"open_work": open_work, "closed_work": closed, "work_attempts": attempts}
+        attempts, logs = {}, {}
+        for r in open_work:
+            if not isinstance(r.get("id"), str):
+                continue
+            scanned = self.work.attempts(r["id"], ATTEMPT_SCAN)
+            attempts[r["id"]] = scanned[-LIMITS.work_attempts:]
+            logs[r["id"]] = [summary for a in scanned if (summary := _attempt_summary(a))]
+        return {"open_work": open_work, "closed_work": closed, "work_attempts": attempts,
+                "work_attempt_log": logs}
 
     def cycle(self) -> CycleReport:
         with self._cond:
@@ -424,6 +450,20 @@ class Runtime:
             except WorkError as exc:  # still run it, but unlinked, and say so
                 rejected.append({"op": "link", "target": action.work_id, "reason": str(exc)})
                 work_id = None
+            if work_id is not None:
+                # No blind repetition: an exact repeat (compared as it would be stored,
+                # so redacted) of an attempt that failed or was interrupted since the
+                # work's understanding last changed is refused, not executed.
+                identity = attempt_identity(action.kind,
+                                            redact(action.params, limit=STORED_STRING_LIMIT))
+                earlier = self.work.unsettled_repeat(work_id, identity)
+                if earlier is not None:
+                    rejected.append({
+                        "op": "action_refused", "target": work_id, "repeats": earlier["action_id"],
+                        "reason": (f"identical to attempt {earlier['action_id']} "
+                                   f"({earlier['state']}) made since this work's understanding "
+                                   "last changed; update the understanding before repeating it")})
+                    continue
             steps.append(self.act(dataclasses.replace(action, work_id=work_id)))
         if work.applied or rejected:
             summary["work"] = {"applied": work.applied, "rejected": rejected}
@@ -450,7 +490,8 @@ class Runtime:
             result = self.environment.execute(action)
         except Exception as exc:
             log.exception("executing action %s failed", action.id)
-            result = ActionResult(action.id, executed=False, error=f"executor raised: {exc!r}")
+            result = ActionResult(action.id, executed=False, error=f"executor raised: {exc!r}",
+                                  failure="executor_error")
         try:
             verification = verify(action, result, self.verifiers.get(action.kind))
         except Exception as exc:
@@ -461,3 +502,26 @@ class Runtime:
                       verification=dataclasses.asdict(verification))
         self.memory.put("action", action.id, redact(record, limit=STORED_STRING_LIMIT))
         return Step(action, result, verification)
+
+
+def _attempt_summary(record: Any) -> dict[str, Any] | None:
+    """A compact view of one attempt, for deriving recovery facts over many.
+    A malformed record is skipped (None), never allowed to break the context."""
+    try:
+        return _summarise_attempt(record)
+    except Exception:
+        return None
+
+
+def _summarise_attempt(record: dict[str, Any]) -> dict[str, Any]:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    output = result.get("output") if isinstance(result.get("output"), dict) else {}
+    state = action_state(record)
+    detail = None
+    if state in FAILED:
+        text = result.get("error") or output.get("stderr") or ""
+        detail = text[:300] if isinstance(text, str) else None
+    return {"id": record.get("id"), "strategy_revision": record.get("strategy_revision"),
+            "state": state, "failure": failure_of(record), "returncode": output.get("returncode"),
+            "identity": attempt_identity(record.get("kind"), record.get("params")),
+            "at": record.get("finished_at") or record.get("started_at"), "detail": detail}

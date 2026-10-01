@@ -61,6 +61,9 @@ class Context:
     open_work: list[dict[str, Any]] = field(default_factory=list)
     closed_work: list[dict[str, Any]] = field(default_factory=list)
     work_attempts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # Each open item's attempt log (compact summaries, oldest first, up to the
+    # ledger's scan limit), from which recovery facts are derived.
+    work_attempt_log: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

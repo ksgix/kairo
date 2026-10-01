@@ -282,7 +282,8 @@ class FailureAndStrategyTest(WorkCase):
         [attempt] = w["recent_attempts"]
         self.assertEqual((attempt["state"], attempt["strategy_revision"]), ("failed_to_execute", 1))
         self.assertIn("No such file", attempt["problem"])
-        self.assertEqual(w["attempts_with_current_strategy"], {"shown": 1, "failed": 1})
+        self.assertEqual(w["attempts_with_current_strategy"], {"attempts": 1, "failed": 1})
+        self.assertEqual(attempt["failure"], "not_found")
         self.assertEqual(w["state"], "active")  # a failure is not a blocker by itself
         history = cognition.situations[1]["history"]["actions"]["items"]
         self.assertEqual(history[0]["verification"]["outcome"], "failure")
@@ -292,16 +293,19 @@ class FailureAndStrategyTest(WorkCase):
         rt.start()
         rt.work.apply([create("w", "Get service healthy", strategy="restart it")])
         wid = rt.work.all()[0].id
-        rt.act(run(["false"], work=wid))                 # revision 1
+        rt.act(run(["false"], work=wid))                 # revision 1 (exits 1)
         rt.act(run(["false"], work=wid))                 # revision 1 again: a retry
         rt.work.apply([update(wid, strategy="fix its config first")])
         rt.act(run(["true"], work=wid))                  # revision 2: a new strategy
         w = only_open(build_situation(rt.context()))
         self.assertEqual(w["strategy"], {"revision": 2, "text": "fix its config first"})
         self.assertEqual([a["strategy_revision"] for a in w["recent_attempts"]], [1, 1, 2])
-        self.assertEqual(w["attempts_with_current_strategy"], {"shown": 1, "failed": 0})
+        self.assertEqual(w["attempts_with_current_strategy"], {"attempts": 1, "failed": 0})
         change = [c for c in w["recent_changes"] if c["event"] == "strategy_changed"][0]
-        self.assertEqual((change["revision"], change["previous"]), (2, "restart it"))
+        self.assertEqual(change["revision"], 2)
+        revisions = {r["revision"]: (r["strategy"], r["attempts"], r["failed"], r["succeeded"])
+                     for r in w["recovery"]["revisions"]}
+        self.assertEqual(revisions, {1: ("restart it", 2, 2, 0), 2: ("fix its config first", 1, 0, 1)})
         # Re-sending the same strategy is not a change.
         self.assertIn("changes nothing",
                       rt.work.apply([update(wid, strategy="fix its config first")]).rejected[0]["reason"])

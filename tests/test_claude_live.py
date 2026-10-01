@@ -69,9 +69,20 @@ class LiveClaudeSmokeTest(unittest.TestCase):
         self.assertNotIn(refs["done"], touched, "completed work must not be resumed")
         creates = [r for r in decision.work if r["op"] == "create"]
         self.assertFalse(any("/var/log" in r["objective"] for r in creates), "duplicated work")
+        # The failure must be reassessed in the active work's own record: an update of
+        # *that* work with a non-empty understanding (not just a linked action, and not
+        # an update of some other work item).
+        reassessed = [r for r in decision.work if r["op"] == "update"
+                      and r["work_id"] == refs["disk"] and (r.get("understanding") or "").strip()]
+        self.assertEqual(len(reassessed), 1, f"expected an understanding update: {decision.work}")
         outcome = runtime.work.apply(decision.work)  # validate as the runtime would
         self.assertEqual(outcome.rejected, [])
-        self.assertIn(runtime.work.get(refs["disk"]).state, OPEN)
+        work = runtime.work.get(refs["disk"])
+        self.assertIn(work.state, OPEN)
+        # Applied, it is persisted as the work's understanding, timestamped by the runtime.
+        self.assertEqual(work.understanding, reassessed[0]["understanding"].strip())
+        failed_at = runtime.work.attempts(refs["disk"], 1)[0]["finished_at"]
+        self.assertGreater(work.understanding_at, failed_at)
         print(f"\nlive work decision: work={decision.work} actions="
               f"{[(a.params, a.work_id == refs['disk']) for a in decision.actions]} "
               f"reason={decision.reason!r}")

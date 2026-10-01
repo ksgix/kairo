@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable
 
-from kairo.actions import action_state
+from kairo.actions import FAILED, INDETERMINATE, SUCCEEDED, action_state, failure_of
 from kairo.cognition import Context
 from kairo.redact import MARKER, redact
 
@@ -49,6 +49,8 @@ class Limits:
     work_closed: int = 5       # recently completed or abandoned work items
     work_attempts: int = 4     # recent attempts shown per open work item
     work_history: int = 5      # recent changes shown per open work item
+    work_revisions: int = 5    # strategy revisions summarised per open work item
+    failure_detail: int = 300  # characters of error / stderr shown for a failure
     budget: int = 60_000       # characters of rendered JSON; oldest history goes first
 
 
@@ -272,6 +274,7 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             "requested": _when(rec.get("started_at"), now),
             "finished": _when(rec.get("finished_at"), now) if rec.get("finished_at") else None,
             "state": action_state(rec),
+            "failure": failure_of(rec),
             "returncode": output.get("returncode"),
             "stdout": _cap(output.get("stdout"), limits.action_output),
             "stderr": _cap(output.get("stderr"), limits.action_output),
@@ -282,9 +285,14 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
     return {
         "source": "runtime action log",
         "note": ("'state' is derived by the runtime: verified_successful, verified_failed, "
-                 "executed_unverified (ran; outcome not checked), failed_to_execute, "
-                 "interrupted (cut off by a process exit; not re-run) or in_progress. "
-                 "'purpose' is cognition's stated intent when requesting it."),
+                 "executed_unverified (ran, exit 0, outcome not checked), exited_nonzero (ran, "
+                 "not verified, non-zero exit), failed_to_execute, interrupted (cut off by a "
+                 "process exit and not re-run: the runtime cannot tell whether it completed or "
+                 "what side effects it had) or in_progress. 'failure' says how it failed, as a "
+                 "runtime fact: not_found, permission_denied, timed_out, invalid_params, "
+                 "os_error, executor_error, exited_nonzero or verification_failed. An exit code "
+                 "is only a number; what it means is for cognition to judge. 'purpose' is "
+                 "cognition's stated intent when requesting it."),
         "items": items,
         "omitted_older": _omitted(ctx.counts.get("action"), len(items)),
     }
@@ -309,12 +317,17 @@ def _open_threads(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             unanswered = []
         else:
             unanswered.append({"id": m.id, **_when(m.at, now)})
-    attention = [{"id": rec.get("id"), "state": state}
-                 for rec in ctx.recent_actions[-limits.actions:]
-                 if (state := action_state(rec)) in
-                 ("failed_to_execute", "verified_failed", "interrupted", "in_progress")]
+    failed, unknown = [], []
+    for rec in ctx.recent_actions[-limits.actions:]:
+        state = action_state(rec)
+        if state in FAILED:
+            failed.append({"id": rec.get("id"), "state": state, "failure": failure_of(rec),
+                           "work_id": rec.get("work_id")})
+        elif state in INDETERMINATE:
+            unknown.append({"id": rec.get("id"), "state": state, "work_id": rec.get("work_id")})
     last = _last(ctx.recent_cycles)
     last_cog = (last or {}).get("cognition") or {}
+    last_rejected = (last_cog.get("work") or {}).get("rejected") or []
     waits_over = [w.get("id") for w in ctx.open_work if w.get("state") == "waiting"
                   and _number(w.get("waiting_until")) is not None and w["waiting_until"] <= now]
     return {
@@ -324,14 +337,20 @@ def _open_threads(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
                     "matters may exist that do not appear here."),
         # Human messages after Kairo's most recent message (within the chat shown).
         "unanswered_human_messages": unanswered,
-        "actions_failed_or_interrupted": attention,
+        "actions_failed": failed,
+        # Interrupted: the runtime cannot tell whether these completed or what side
+        # effects they had. Not failures, and not known to be safe to repeat.
+        "actions_outcome_unknown": unknown,
+        # Actions the runtime refused to run last cycle (exact repeats of a failed or
+        # interrupted attempt made without a changed understanding).
+        "attempts_refused": [r for r in last_rejected if r.get("op") == "action_refused"],
         # Actions the previous cycle requested: their results are new since that decision.
         "new_action_results": [a.get("id") for a in (last or {}).get("actions") or []],
         "previous_cycle_failed": {"failure": last_cog.get("failure"),
                                   "ended": _when(last.get("at"), now)}
         if last is not None and last_cog.get("result") == "failed" else None,
         # Work requests the runtime refused last cycle, with its reasons.
-        "work_requests_rejected": (last_cog.get("work") or {}).get("rejected") or [],
+        "work_requests_rejected": [r for r in last_rejected if r.get("op") != "action_refused"],
         # Waiting work whose own waiting time has passed.
         "work_wait_elapsed": waits_over,
         "open_todo_items": len(ctx.todo),
@@ -339,21 +358,75 @@ def _open_threads(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
 
 
 def _work(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
-    def attempt(rec: dict[str, Any]) -> dict[str, Any]:
+    def attempt(rec: Any) -> dict[str, Any]:
+        # One corrupt attempt must not hide the work item or the rest of the work.
+        try:
+            return _attempt(rec)
+        except Exception:
+            return {"action_id": rec.get("id") if isinstance(rec, dict) else None,
+                    "unreadable": True}
+
+    def _attempt(rec: dict[str, Any]) -> dict[str, Any]:
         result = rec.get("result") or {}
         output = result.get("output") or {}
         state = action_state(rec)
         item = {"action_id": rec.get("id"), "strategy_revision": rec.get("strategy_revision"),
                 "requested": _when(rec.get("started_at"), now), "state": state,
-                "purpose": rec.get("reason"), "returncode": output.get("returncode")}
-        if state not in ("verified_successful", "executed_unverified"):
-            item["problem"] = _cap(result.get("error") or output.get("stderr"), 300)
+                "failure": failure_of(rec), "purpose": rec.get("reason"),
+                "returncode": output.get("returncode")}
+        if state in FAILED:
+            item["problem"] = _cap(result.get("error") or output.get("stderr"),
+                                   limits.failure_detail)
+        elif state in INDETERMINATE:
+            item["outcome"] = "indeterminate"
         return item
+
+    def recovery(w: dict[str, Any], log: list[dict[str, Any]]) -> dict[str, Any]:
+        failures = [a for a in log if a.get("state") in FAILED]
+        latest = failures[-1] if failures else None
+        understood = _number(w.get("understanding_at"))
+        latest_at = _number((latest or {}).get("at"))
+        repeated = 0
+        for a in reversed(log):  # identical failures in a row, most recent first
+            if a.get("state") not in FAILED or a.get("identity") != log[-1].get("identity"):
+                break
+            repeated += 1
+        texts = {e.get("revision"): e.get("text") for e in (w.get("strategy_log") or [])
+                 if isinstance(e, dict)}
+        texts.setdefault(w.get("strategy_revision"), w.get("strategy"))
+        by_revision: dict[Any, list[dict[str, Any]]] = {}
+        for a in log:
+            by_revision.setdefault(a.get("strategy_revision"), []).append(a)
+        numbered = sorted((r for r in by_revision if isinstance(r, int)), reverse=True)
+        revisions = [{
+            "revision": r,
+            "strategy": texts.get(r, "unknown"),
+            "attempts": len(by_revision[r]),
+            "failed": sum(a.get("state") in FAILED for a in by_revision[r]),
+            "succeeded": sum(a.get("state") in SUCCEEDED for a in by_revision[r]),
+            "outcome_unknown": sum(a.get("state") in INDETERMINATE for a in by_revision[r]),
+            "last_attempt": _when(by_revision[r][-1].get("at"), now),
+        } for r in numbered[:limits.work_revisions]]
+        return {
+            "latest_failure": None if latest is None else {
+                "action_id": latest.get("id"), "strategy_revision": latest.get("strategy_revision"),
+                "failure": latest.get("failure"), "returncode": latest.get("returncode"),
+                **_when(latest.get("at"), now),
+                "detail": _cap(latest.get("detail"), limits.failure_detail)},
+            # Runtime fact: whether cognition changed this work's understanding after
+            # the latest failure (a timing fact; the diagnosis itself is understanding).
+            "diagnosis_since_latest_failure": None if latest is None else (
+                understood is not None and latest_at is not None and understood > latest_at),
+            "repeated_identical_failures": repeated,
+            "revisions": revisions,
+            "attempts_scanned": len(log),
+        }
 
     def open_item(w: dict[str, Any]) -> dict[str, Any]:
         attempts = ctx.work_attempts.get(w.get("id")) or []
+        log = ctx.work_attempt_log.get(w.get("id")) or []
         revision = w.get("strategy_revision")
-        current = [a for a in attempts if a.get("strategy_revision") == revision]
+        current = [a for a in log if a.get("strategy_revision") == revision]
         item = {
             "id": w.get("id"),
             "state": w.get("state"),
@@ -368,9 +441,9 @@ def _work(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             "updated": _when(w.get("updated_at"), now),
             "recent_attempts": [attempt(a) for a in attempts],
             "attempts_with_current_strategy": {
-                "shown": len(current),
-                "failed": sum(action_state(a) not in ("verified_successful", "executed_unverified")
-                              for a in current)},
+                "attempts": len(current),
+                "failed": sum(a.get("state") in FAILED for a in current)},
+            "recovery": recovery(w, log),
             "recent_changes": [{**_when(h.get("at"), now), **{k: v for k, v in h.items() if k != "at"}}
                                for h in (w.get("history") or [])[-limits.work_history:]],
         }
@@ -401,16 +474,19 @@ def _work(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
                     "'blocked' has a concrete obstacle. Completed and abandoned work is history: "
                     "it cannot resume; a new reason means new work. Work need not have todo items "
                     "or a directive."),
-        "note": ("objective, why, strategy text, understanding, next_step and reasons are "
-                 "cognition's own earlier words (interpretation). States, times, strategy "
-                 "revisions, attempts, completion evidence and completion_basis are runtime "
-                 "facts."),
+        "note": ("objective, why, strategy text, understanding (including any diagnosis of a "
+                 "failure), next_step and reasons are cognition's own earlier words "
+                 "(interpretation). States, times, strategy revisions, attempts, failure kinds, "
+                 "exit codes, recovery counts, diagnosis_since_latest_failure (only whether the "
+                 "understanding changed after the latest failure), completion evidence and "
+                 "completion_basis are runtime facts. An attempt with outcome 'indeterminate' "
+                 "was interrupted: whether it completed, and its side effects, are unknown."),
         "completion_basis": (
             "For completed work, recorded by the runtime: 'verified' means a runtime verifier "
             "confirmed at least one cited attempt succeeded. 'unverified' means the runtime did "
             "not independently verify the objective: the completion is cognition's judgment, "
             "based on attempts that ran and exited 0. 'unknown' means no basis was recorded."),
-        "open": [open_item(w) for w in ctx.open_work],
+        "open": [_guarded(open_item, w) for w in ctx.open_work],
         "recently_closed": [closed_item(w) for w in ctx.closed_work],
         "omitted": _omitted(total, shown),
     }
@@ -497,6 +573,14 @@ def _when(t: Any, now: float) -> dict[str, Any]:
     if t > now + 1:  # a clock change: no honest age exists
         return {"at": _iso(t), "age_seconds": None, "note": "recorded later than now (clock change?)"}
     return {"at": _iso(t), "age_seconds": max(round(now - t), 0)}
+
+
+def _guarded(render: Callable[[dict[str, Any]], dict[str, Any]], w: Any) -> dict[str, Any]:
+    """Render one work item; a corrupt one is reported, not allowed to hide the rest."""
+    try:
+        return render(w)
+    except Exception:
+        return {"id": w.get("id") if isinstance(w, dict) else None, "unreadable": True}
 
 
 def _deadline(t: float, now: float) -> dict[str, Any]:

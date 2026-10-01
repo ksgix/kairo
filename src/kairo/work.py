@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from kairo.actions import action_state
+from kairo.actions import FAILED, action_state, attempt_identity
 from kairo.memory import Collection, Memory
 from kairo.redact import redact
 
@@ -65,7 +65,9 @@ MAX_OPEN = 25          # open work items at once
 MAX_EVIDENCE = 10      # action ids cited for a completion
 MAX_WAIT = 30 * 86400  # longest wait_seconds accepted
 HISTORY = 12           # change-log entries kept per work item
-ATTEMPT_SCAN = 200     # linked actions examined when checking evidence
+STRATEGY_LOG = 10      # strategy revisions remembered per work item
+STRATEGY_TEXT = 200    # characters of each remembered strategy
+ATTEMPT_SCAN = 200     # linked actions examined (evidence, recovery facts, repetition)
 
 # A completion must cite at least one of this work's attempts that succeeded:
 # verified by a runtime verifier, or, where no verifier exists, ran and exited 0.
@@ -101,6 +103,11 @@ class Work:
     state_since: float | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # When understanding last changed (runtime time), so the runtime can tell
+    # whether cognition reassessed after a failure. None: never changed.
+    understanding_at: float | None = None
+    # The last STRATEGY_LOG strategies: {"revision", "text", "since"}.
+    strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
 
 class WorkError(ValueError):
@@ -212,6 +219,8 @@ class WorkLedger(Collection[Work]):
             created_at=now, updated_at=now, state_since=now,
             history=[{"at": now, "event": "created"}],
         )
+        work = dataclasses.replace(work, strategy_log=[
+            {"revision": 1, "text": work.strategy[:STRATEGY_TEXT], "since": now}])
         self.save(_clean(work))
         refs[ref] = work.id
         return {"op": "create", "ref": ref, "work_id": work.id}
@@ -225,14 +234,19 @@ class WorkLedger(Collection[Work]):
                 if value != getattr(work, name):
                     changes[name] = value
                     events.append({"at": now, "event": f"{name}_updated"})
+                    if name == "understanding":
+                        changes["understanding_at"] = now
         if req.get("strategy") is not None:
             strategy = _text(req, "strategy", required=True)
             if strategy != work.strategy:
+                revision = work.strategy_revision + 1
                 changes["strategy"] = strategy
-                changes["strategy_revision"] = work.strategy_revision + 1
-                events.append({"at": now, "event": "strategy_changed",
-                               "revision": work.strategy_revision + 1,
-                               "previous": work.strategy[:200]})
+                changes["strategy_revision"] = revision
+                changes["strategy_log"] = ([e for e in work.strategy_log if isinstance(e, dict)]
+                                           + [{"revision": revision,
+                                               "text": strategy[:STRATEGY_TEXT],
+                                               "since": now}])[-STRATEGY_LOG:]
+                events.append({"at": now, "event": "strategy_changed", "revision": revision})
         if not changes:
             raise WorkError("update changes nothing")
         self._save(work, changes, events, now)
@@ -283,9 +297,12 @@ class WorkLedger(Collection[Work]):
             if record is None:
                 raise WorkError(f"action {action_id!r} is not an attempt at this work")
             state = action_state(record)
+            returncode = ((record.get("result") or {}).get("output") or {}).get("returncode")
+            if state == "exited_nonzero":
+                raise WorkError(f"action {action_id} cannot be evidence: it exited "
+                                f"{returncode} and no verifier confirmed success")
             if state not in EVIDENCE_STATES:
                 raise WorkError(f"action {action_id} cannot be evidence: it is {state}")
-            returncode = ((record.get("result") or {}).get("output") or {}).get("returncode")
             # Unverified, the exit code is the only success signal the runtime has.
             # (A verifier may accept a non-zero exit; then the attempt is verified.)
             if state == "executed_unverified" and not (
@@ -295,6 +312,28 @@ class WorkLedger(Collection[Work]):
                                 f"{returncode} and no verifier confirmed success")
             evidence.append({"action_id": action_id, "state": state, "returncode": returncode})
         return evidence
+
+    def unsettled_repeat(self, work_id: str, identity: str) -> dict[str, Any] | None:
+        """An earlier attempt at this work, identical to ``identity``, that failed or
+        was interrupted after cognition last changed its understanding. Repeating it
+        without reassessing is refused. No counting: a changed understanding clears it."""
+        try:
+            work = self.get(work_id)
+        except (TypeError, ValueError):
+            return None
+        if work is None:
+            return None
+        since = work.understanding_at if isinstance(work.understanding_at, (int, float)) else None
+        for record in reversed(self.attempts(work_id, ATTEMPT_SCAN)):
+            state = action_state(record)
+            if state not in FAILED and state != "interrupted":
+                continue
+            at = record.get("finished_at") or record.get("started_at")
+            if since is not None and isinstance(at, (int, float)) and at <= since:
+                continue  # reassessed after this one
+            if attempt_identity(record.get("kind"), record.get("params")) == identity:
+                return {"action_id": record.get("id"), "state": state}
+        return None
 
     # -- helpers ---------------------------------------------------------------
 

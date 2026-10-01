@@ -63,9 +63,8 @@ class Environment:
             case "process.run":
                 return self._run_process(action)
             case _:
-                return ActionResult(
-                    action.id, executed=False, error=f"unknown action kind: {action.kind}"
-                )
+                return ActionResult(action.id, executed=False, failure="invalid_params",
+                                    error=f"unknown action kind: {action.kind}")
 
     def _run_process(self, action: Action) -> ActionResult:
         params = action.params
@@ -82,7 +81,7 @@ class Environment:
         elif unknown := set(params) - {"argv", "cwd", "timeout"}:
             error = f"process.run got unknown params: {sorted(unknown)}"
         if error:
-            return ActionResult(action.id, executed=False, error=error)
+            return ActionResult(action.id, executed=False, error=error, failure="invalid_params")
         try:
             proc = subprocess.run(
                 argv,
@@ -93,8 +92,15 @@ class Environment:
                 cwd=cwd,
                 timeout=timeout,
             )
-        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-            return ActionResult(action.id, executed=False, error=str(exc))
+        except FileNotFoundError as exc:  # the program or cwd did not exist
+            return ActionResult(action.id, executed=False, error=str(exc), failure="not_found")
+        except PermissionError as exc:
+            return ActionResult(action.id, executed=False, error=str(exc),
+                                failure="permission_denied")
+        except subprocess.TimeoutExpired as exc:
+            return ActionResult(action.id, executed=False, error=str(exc), failure="timed_out")
+        except (OSError, ValueError) as exc:
+            return ActionResult(action.id, executed=False, error=str(exc), failure="os_error")
         return ActionResult(
             action.id,
             executed=True,
