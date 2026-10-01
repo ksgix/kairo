@@ -97,6 +97,24 @@ The layers, from most lasting to most momentary:
 - **Waiting deadlines:** while sleeping, Kairo also wakes at the earliest future `waiting_until` of any open work, with the wake reason `wait elapsed for work <id>`. The work stays `waiting` until cognition decides otherwise.
 - **Provider failures** are cycle-level. They are never attributed to a work item, and they leave work and its failure history untouched.
 
+## Cognition providers
+
+Kairo's cognition layer (`Cognition`, in `cognition.py`) asks providers for each cycle's decision. Providers are adapters (`claude.py`, test fakes; later e.g. Gemini). They don't know about each other, about fallback, or about Kairo's state, and they have no tools, so a failed call can't have changed anything.
+
+- **Order:** `--cognition claude,claude@haiku`. The first is always asked first, every cycle. Later providers are asked only after a technical failure, and each provider is asked at most once per cycle. The first usable decision is used, even if it is "sleep" or "do nothing". There's no sticky fallback, health scoring, ranking or retrying.
+- **Falls back:** `unavailable`, `timeout`, `process_failed`, `auth_failed`, `rate_limited`, `empty_output`, `invalid_output`, `invalid_decision` (an answer that breaks the decision contract is no decision) and `provider_error`.
+- **Never falls back:** `model_error`, meaning the model ran but declined or failed to answer. Kairo doesn't route around refusals, and never compares the quality of two valid decisions.
+- **All providers failed:** a cycle-level cognition failure, as before. Work is unchanged and no action runs.
+- **Provenance:** each cycle records the provider that decided, why it was asked (`first_in_order` or `fallback_after:<provider>:<outcome>`) and every attempt. Cognition sees which provider it is (`now.cognition`) and which provider made each earlier decision (`history.cycles[*].provider`). `status` shows the configured order and the last provider used.
+- **Options:** `--provider-opt claude@haiku.model=haiku`. `--model` and `--cognition-timeout` remain shortcuts for every Claude provider.
+- **Credentials:** never accepted as options. Each provider declares where its credentials live (`secret_env`, `secret_files`).
+  - Their values are always redacted.
+  - A provider's subprocess gets only its own credential variables.
+  - Actions (`process.run`) get none.
+  - An action that names a known credential file is refused.
+  - **Limit:** an action can still reach a credential file indirectly. Its token values are then redacted from output, but not if the output is transformed (for example, encoded). Real isolation would need actions to run as a different OS user than the one holding provider credentials.
+- **Adding a provider** means adding an adapter (Kairo's instructions, situation and schema come from `instructions.cognition_request`) and one entry in `registry.PROVIDERS`. The runtime doesn't change.
+
 ## Situation model
 
 `Runtime.context()` gathers runtime state; `situation.build_situation()` turns it into what cognition sees each cycle. The situation is derived, never stored, so the runtime's records stay the only source of truth. It is plain data and does not depend on any provider.

@@ -17,104 +17,64 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kairo.cognition import CognitionError, Context, Decision, decision_schema, parse_decision
-from kairo.situation import build_situation, render_situation
+from kairo.cognition import CognitionError, Context, Decision, parse_decision
+from kairo.instructions import INSTRUCTIONS, cognition_request
+from kairo.redact import scrubbed_env
+
+# Kept under its old name: the instructions are Kairo's, not Claude's.
+SYSTEM_PROMPT = INSTRUCTIONS
 
 DEFAULT_TIMEOUT = 300.0
 
-SYSTEM_PROMPT = """\
-You are the cognition of Kairo, a persistent autonomous runtime on a Linux host. \
-You are not answering a chat request, and you are not Kairo itself: Kairo is the \
-runtime, which continues across cycles, sleeps and wakes, and survives restarts. \
-You are called once per cycle with Kairo's current situation and decide what Kairo \
-does next.
-
-The situation (JSON) has these sections: kairo (identity), now (lifecycle state, \
-why Kairo is awake, previous cycle and process), environment (a fresh host \
-observation and what changed since the last one), directives (the lasting areas \
-Kairo is responsible for), work (ongoing pursuits carried across cycles, with their \
-attempts), todo (operational notes), history (recent cycles, \
-actions with results and verification, and chat), open_threads (loose ends the \
-runtime sees in its records; informational, not a task list), knowledge, capabilities (the only actions the runtime can \
-execute) and context (bounds and what was omitted). Each part says where it comes \
-from and how old it is.
-
-Treat runtime records and observations as facts, weighted by their age. Treat \
-earlier assessments and action purposes as your own past interpretations, not \
-facts: check them against the records. An action's state says whether it actually \
-worked; "executed_unverified" means it ran but nobody checked the outcome. \
-Missing or unknown information is really missing; never fill it in.
-
-Each cycle:
-1. Understand the situation, and whether this continues earlier work or is new.
-2. Decide what matters now, given the directives, the environment, open threads \
-and recent results: a problem, a risk, an opportunity, or an unanswered message.
-3. If something needs doing, request concrete actions from capabilities. The \
-runtime executes them after you answer; you will see their results next cycle, so \
-never claim an outcome you have not seen.
-4. If you need those results, set sleep=false for another cycle right away. \
-Otherwise set sleep=true, with wake_after (seconds) if something should be \
-rechecked at a particular time; null uses the runtime default.
-5. Reply (replies) only when it helps the human: to answer them, or to report \
-something they should know. Be concise and do not repeat earlier replies.
-
-Ongoing work (see capabilities.work_requests for the exact requests):
-- When something deserves pursuit across cycles, create work for it instead of \
-keeping it only in your reason. First check the open and recently closed work so you \
-do not duplicate or resurrect it. Link every action to the work it is an attempt at.
-- Keep each work item's understanding, strategy and next_step current, so the next \
-cycle can continue it.
-- After a failed attempt, understand why before acting again, and record that \
-diagnosis in the work's understanding. A failure kind or exit code is a runtime \
-fact; what it means is your judgment (an exit code is only a number). The runtime \
-refuses an exact repeat of a failed or interrupted attempt unless the work's \
-understanding has changed since it. Repeating the same approach is a retry, and needs \
-a reason; if the approach itself was wrong, change the strategy (update it) and try \
-something materially different. The work's recovery section shows each strategy \
-revision's results and any identical failures in a row.
-- An interrupted attempt has an unknown outcome: it may have run partly or fully. \
-Check the world before repeating it.
-- Use waiting when progress depends on something external or on time, for example a \
-failure that looks temporary; give wait_seconds and the runtime wakes Kairo when it \
-runs out. Use blocked only for a concrete obstacle you cannot get past now. \
-Actionable work stays active.
-- Complete work only when its outcome is actually achieved, citing as evidence \
-this work's attempts whose results show it. Evidence must be verified successful, or, \
-where the runtime has no verifier, an attempt that exited 0; a non-zero exit without \
-verification can never support completion. The runtime records the completion as \
-"verified" or "unverified". An unverified completion is only your own judgment of the \
-results, not verification: never treat it as proof. Abandon work, with a reason, when \
-it is deliberately no longer worth pursuing. Closed work is history; a new reason \
-means new work.
-
-Principles: An empty todo list does not mean nothing matters, and todo is not your \
-purpose; directives and the state of the world are. Do not invent busywork: when \
-nothing is genuinely worth doing, sleep. Stay within capabilities. Never output, \
-copy or seek out secrets or credentials. Prefer actions that are safe, observable \
-and reversible, and give each action's purpose in its reason. Put your assessment \
-in reason: what you understood, what you intend and why. The next cycle will read it.
-
-Answer only with the JSON object required by the output schema."""
+# Where the Claude CLI's credentials can live. Kairo never reads them for use;
+# it only keeps them away from other processes and out of its records.
+SECRET_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+SECRET_FILES = ("~/.claude/.credentials.json",)
+OPTIONS = {"model", "timeout", "executable"}
 
 
 class ClaudeCognition:
     """Cognition provider backed by the local ``claude`` CLI."""
 
-    name = "claude"
+    secret_env = SECRET_ENV
+    secret_files = SECRET_FILES
 
     def __init__(self, executable: str = "claude", model: str | None = None,
-                 timeout: float = DEFAULT_TIMEOUT, workdir: str | Path | None = None) -> None:
+                 timeout: float = DEFAULT_TIMEOUT, workdir: str | Path | None = None,
+                 name: str = "claude") -> None:
+        self.name = name  # this instance's id (e.g. "claude", or "claude@haiku")
         self.executable = executable
         self.model = model
         self.timeout = timeout
         self.workdir = str(workdir) if workdir is not None else None
 
+    @classmethod
+    def from_options(cls, name: str, options: dict[str, str],
+                     workdir: str | Path | None = None) -> "ClaudeCognition":
+        """Build from string options (CLI). Credentials are never options: the
+        CLI authenticates itself (its own login or its environment variables)."""
+        unknown = set(options) - OPTIONS
+        if unknown:
+            raise ValueError(f"{name}: unknown option(s) {sorted(unknown)}; "
+                             f"allowed: {sorted(OPTIONS)}")
+        try:
+            timeout = float(options.get("timeout", DEFAULT_TIMEOUT))
+        except ValueError:
+            raise ValueError(f"{name}: timeout must be a number of seconds") from None
+        if timeout <= 0:
+            raise ValueError(f"{name}: timeout must be > 0")
+        return cls(executable=options.get("executable", "claude"), model=options.get("model"),
+                   timeout=timeout, workdir=workdir, name=name)
+
     def command(self, context: Context) -> list[str]:
+        return self._command(cognition_request(context))
+
+    def _command(self, request: Any) -> list[str]:
         argv = [
             self.executable, "-p",
             "--output-format", "json",
-            "--json-schema", json.dumps(decision_schema(context.available_actions)),
-            "--system-prompt", SYSTEM_PROMPT,
+            "--json-schema", request.schema_json,
+            "--system-prompt", request.instructions,
             # No tools, settings, hooks, MCP servers or skills: Claude may only
             # answer. Execution stays with the runtime's action interface.
             "--tools", "",
@@ -128,13 +88,14 @@ class ClaudeCognition:
         return argv
 
     def decide(self, context: Context) -> Decision:
-        situation = render_situation(build_situation(context))
-        prompt = "Kairo situation:\n" + situation
+        request = cognition_request(context)
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                self.command(context), input=prompt, capture_output=True, text=True,
+                self._command(request), input=request.prompt, capture_output=True, text=True,
                 errors="replace", timeout=self.timeout, cwd=self.workdir,
+                # Only Claude's own credentials, never another provider's.
+                env=scrubbed_env(keep=self.secret_env),
             )
         except FileNotFoundError as exc:
             raise CognitionError("unavailable", f"claude executable not found: {exc}") from None
@@ -147,13 +108,14 @@ class ClaudeCognition:
         seconds = round(time.monotonic() - started, 3)
 
         if proc.returncode != 0:
+            _raise_reported_error(proc.stdout)  # Claude's own error report, if it gave one
             detail = _tail(proc.stderr) or _tail(proc.stdout) or "no output"
             raise CognitionError("process_failed", f"claude exited {proc.returncode}: {detail}")
         envelope = _envelope(proc.stdout)
         decision = parse_decision(_answer(envelope), context.available_actions)
         return dataclasses.replace(decision, meta={
             "seconds": seconds,
-            "situation_chars": len(situation),
+            "situation_chars": len(request.prompt),
             "api_seconds": _round(envelope.get("duration_api_ms"), 1000),
             "turns": envelope.get("num_turns"),
             "cost_usd": envelope.get("total_cost_usd"),
@@ -171,9 +133,36 @@ def _envelope(stdout: str) -> dict[str, Any]:
     if not isinstance(envelope, dict) or envelope.get("type") != "result":
         raise CognitionError("invalid_output", "claude output is not a result object")
     if envelope.get("is_error") or envelope.get("subtype") != "success":
-        detail = envelope.get("api_error_status") or envelope.get("subtype") or "unknown error"
-        raise CognitionError("model_error", f"claude reported an error: {_tail(str(detail))}")
+        raise _reported_error(envelope)
     return envelope
+
+
+def _raise_reported_error(stdout: str) -> None:
+    """If the CLI exited non-zero but printed a result envelope reporting an
+    error, raise that classified error instead of a bare process failure."""
+    try:
+        envelope = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return
+    if isinstance(envelope, dict) and envelope.get("type") == "result" and (
+            envelope.get("is_error") or envelope.get("subtype") != "success"):
+        raise _reported_error(envelope)
+
+
+def _reported_error(envelope: dict[str, Any]) -> CognitionError:
+    """Map Claude's reported error to Kairo's outcome vocabulary. The API status
+    decides when present; a model that ran and did not answer is model_error."""
+    status = envelope.get("api_error_status")
+    status = status if isinstance(status, int) and not isinstance(status, bool) else None
+    text = str(envelope.get("result") or "")
+    detail = f"claude reported an error: {_tail(str(status or envelope.get('subtype') or 'unknown error'))}"
+    if status in (401, 403) or "/login" in text or "invalid api key" in text.lower():
+        return CognitionError("auth_failed", detail)
+    if status in (429, 529):
+        return CognitionError("rate_limited", detail)
+    if status is not None and 500 <= status < 600:
+        return CognitionError("unavailable", detail)
+    return CognitionError("model_error", detail)
 
 
 def _answer(envelope: dict[str, Any]) -> Any:

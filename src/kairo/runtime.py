@@ -16,6 +16,7 @@ import dataclasses
 import logging
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -23,7 +24,7 @@ from typing import Any
 
 from kairo.actions import FAILED, Action, ActionResult, action_state, attempt_identity, failure_of
 from kairo.chat import Chat, Message, Sender
-from kairo.cognition import CognitionError, CognitionProvider, Context, Decision
+from kairo.cognition import Cognition, CognitionProvider, Context, as_cognition
 from kairo.directives import Directives
 from kairo.environment import Environment
 from kairo.memory import Memory
@@ -70,7 +71,7 @@ class Runtime:
         self,
         memory: Memory,
         environment: Environment | None = None,
-        cognition: CognitionProvider | None = None,
+        cognition: Cognition | CognitionProvider | None = None,
         verifiers: dict[str, Verifier] | None = None,
         reassess_after: float | None = None,
     ) -> None:
@@ -233,11 +234,17 @@ class Runtime:
                 "running": self._running,
                 "wake_at": self._wake_at if self.state is State.SLEEPING else None,
             }
+        cognition = as_cognition(self.cognition)
+        last = (self.memory.get("runtime", "last_cycle") or {}).get("cognition") or {}
         return {
             **snapshot,
             "directives": len(self.directives.active()),
             "open_todo": len(self.todo.open()),
-            "cognition": getattr(self.cognition, "name", None),
+            # The configured provider order (configuration, comma-separated).
+            "cognition": ",".join(cognition.names) if cognition else None,
+            # Which provider made the last cycle's decision, and why it was asked.
+            "cognition_last": {"provider": last.get("provider"),
+                               "selection": last.get("selection")} if last else None,
         }
 
     # -- continuous operation ---------------------------------------------
@@ -374,7 +381,7 @@ class Runtime:
         summary = {
             "at": time.time(),
             "wake_reason": context.wake_reason,
-            "cognition": {"provider": getattr(self.cognition, "name", None), **cognition},
+            "cognition": {"provider": None, **cognition},
             "actions": [{"id": s.action.id, "kind": s.action.kind,
                          "outcome": s.verification.outcome} for s in steps],
             "state": State.SLEEPING if sleep_reason is not None else State.AWAKE,
@@ -400,34 +407,29 @@ class Runtime:
             reason = "no cognition provider configured"
             return [], reason, {"result": "none"}, reason, None
 
+        # Which provider is asked, and fallback, belong to the cognition layer;
+        # the runtime only receives at most one validated Decision.
         started = time.monotonic()
         try:
-            decision = self.cognition.decide(context)
-            # Provider output is untrusted: a malformed decision is a cognition
-            # failure, not something to half-execute.
-            if not isinstance(decision, Decision):
-                raise CognitionError("invalid_decision",
-                                     f"decide() returned {type(decision).__name__}, not Decision")
-            if not all(isinstance(a, Action) for a in decision.actions):
-                raise CognitionError("invalid_decision",
-                                     "Decision.actions must contain only Action instances")
-            if not isinstance(decision.work, list):
-                raise CognitionError("invalid_decision", "Decision.work must be a list")
-        except Exception as exc:  # a failing provider must not take the runtime down
-            category = getattr(exc, "category", "provider_error")
-            if isinstance(exc, CognitionError):
-                log.error("cognition failed (%s): %s", category, exc)
-                detail = str(exc)
-            else:
-                log.exception("cognition provider failed")
-                detail = repr(exc)
-            reason = redact(f"cognition error ({category}): {detail}", limit=500)
-            return [], reason, {"result": "failed", "failure": category,
+            result = as_cognition(self.cognition).decide(context)
+        except Exception as exc:  # the cognition layer itself failed: still not fatal
+            log.error("cognition failed: %s", redact(traceback.format_exc(), limit=4000))
+            reason = redact(f"cognition error (provider_error): {exc!r}", limit=500)
+            return [], reason, {"result": "failed", "failure": "provider_error",
                                 "seconds": round(time.monotonic() - started, 3)}, reason, None
+        provenance = result.summary()
+        decision = result.decision
+        if decision is None:  # every provider asked failed: a cycle-level cognition failure
+            reason = redact(f"cognition error ({result.failure}): {result.attempts[-1].detail}",
+                            limit=500)
+            return [], reason, {"result": "failed", "failure": result.failure,
+                                "seconds": round(time.monotonic() - started, 3),
+                                **provenance}, reason, None
 
         summary = {
             "result": "decided",
             "seconds": round(time.monotonic() - started, 3),
+            **provenance,
             "sleep": decision.sleep,
             "wake_after": decision.wake_after,
             "requested": [a.kind for a in decision.actions],

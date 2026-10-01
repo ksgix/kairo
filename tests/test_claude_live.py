@@ -87,6 +87,34 @@ class LiveClaudeSmokeTest(unittest.TestCase):
               f"{[(a.params, a.work_id == refs['disk']) for a in decision.actions]} "
               f"reason={decision.reason!r}")
 
+    def test_fallback_from_unavailable_claude_to_real_claude(self):
+        """Real fallback: an unavailable Claude first, then a real Claude model,
+        through a real runtime cycle."""
+        from kairo.cognition import Cognition
+
+        memory = Memory()
+        self.addCleanup(memory.close)
+        model = os.environ.get("KAIRO_LIVE_MODEL", "haiku")
+        cognition = Cognition([
+            ClaudeCognition(executable="/nonexistent/claude", name="claude"),
+            ClaudeCognition(model=model, timeout=180, name=f"claude@{model}"),
+        ])
+        runtime = Runtime(memory, cognition=cognition)
+        runtime.receive("Smoke test: please reply with one short sentence, then sleep.")
+        runtime.start()
+        with self.assertLogs("kairo", "ERROR"):  # the first provider's failure is logged
+            runtime.cycle()
+
+        cog = memory.all("cycle")[-1]["cognition"]
+        self.assertEqual(cog["result"], "decided")
+        self.assertEqual(cog["provider"], f"claude@{model}")
+        self.assertEqual(cog["selection"], {"position": 1,
+                                            "reason": "fallback_after:claude:unavailable"})
+        self.assertEqual([(a["provider"], a["outcome"]) for a in cog["attempts"]],
+                         [("claude", "unavailable"), (f"claude@{model}", "decided")])
+        print(f"\nlive fallback: provider={cog['provider']} selection={cog['selection']} "
+              f"meta={cog.get('meta')}")
+
 
 if __name__ == "__main__":
     unittest.main()

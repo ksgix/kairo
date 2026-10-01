@@ -159,7 +159,15 @@ def _now(ctx: Context, now: float) -> dict[str, Any]:
             "ended_in_state": last.get("state"),
         },
         "default_reassess_after_seconds": r.get("default_reassess_after"),
+        # Which cognition provider is being asked now, and why (runtime facts).
+        "cognition": _asked(r.get("cognition")),
     }
+
+
+def _asked(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {"provider": value.get("provider"), "selected": value.get("selected")}
 
 
 def _environment(ctx: Context, now: float) -> dict[str, Any]:
@@ -235,11 +243,15 @@ def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             "ended": _when(rec.get("at"), now),
             "wake_reason": rec.get("wake_reason"),
             "cognition": cog.get("result"),
+            # Which provider decided: earlier assessments may be another model's.
+            "provider": cog.get("provider"),
             "ended_in_state": rec.get("state"),
         }
         if cog.get("result") == "failed":
             item["failure"] = cog.get("failure")
             item["failure_detail"] = rec.get("note")  # written by the runtime: a fact
+            item["providers_tried"] = [{"provider": a.get("provider"), "outcome": a.get("outcome")}
+                                       for a in cog.get("attempts") or [] if isinstance(a, dict)]
         elif cog.get("result") == "decided":
             item["requested_actions"] = [a.get("id") for a in rec.get("actions") or []]
             item["replies"] = cog.get("replies")

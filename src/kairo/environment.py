@@ -16,6 +16,7 @@ import sys
 from typing import Any
 
 from kairo.actions import Action, ActionResult
+from kairo.redact import protected_files, scrubbed_env
 
 DEFAULT_TIMEOUT = 300.0  # seconds; an action must never block the runtime forever
 
@@ -80,12 +81,15 @@ class Environment:
             error = "process.run 'timeout' must be a positive number"
         elif unknown := set(params) - {"argv", "cwd", "timeout"}:
             error = f"process.run got unknown params: {sorted(unknown)}"
+        elif refused := _names_credential_file(argv, cwd):
+            error = f"process.run refused: it names a provider credential file ({refused})"
         if error:
             return ActionResult(action.id, executed=False, error=error, failure="invalid_params")
         try:
             proc = subprocess.run(
                 argv,
                 stdin=subprocess.DEVNULL,
+                env=scrubbed_env(),  # actions never get cognition providers' credentials
                 capture_output=True,
                 text=True,
                 errors="replace",
@@ -106,3 +110,17 @@ class Environment:
             executed=True,
             output={"returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr},
         )
+
+
+def _names_credential_file(argv: list[str], cwd: str | None) -> str | None:
+    """A narrow guard, not a sandbox: refuse an action that names a known
+    provider credential file (its full path or its file name). A determined
+    command can still reach it indirectly; the file's secret values are then
+    still redacted from output (kairo.redact), but not if transformed (e.g.
+    encoded). Real isolation needs actions to run as a different OS user."""
+    texts = list(argv) + ([cwd] if cwd else [])
+    for path in protected_files():
+        for needle in {path, os.path.basename(path), path.replace(os.path.expanduser("~"), "~", 1)}:
+            if needle and any(needle in text for text in texts):
+                return os.path.basename(path)
+    return None

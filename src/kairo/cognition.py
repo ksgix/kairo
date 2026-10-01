@@ -15,11 +15,17 @@ persisted. Providers show cognition the situation built from it (see
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 import math
+import time
+import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from kairo.actions import Action
+from kairo.redact import protect_env, protect_files, redact
 from kairo.chat import Message
 from kairo.directives import Directive
 from kairo.todo import TodoItem
@@ -84,19 +90,181 @@ class Decision:
 
 
 class CognitionProvider(Protocol):
+    """A cognition implementation (an adapter for one model service). It only
+    turns a Context into a Decision; it knows nothing about other providers,
+    fallback, or Kairo's state, and must have no side effects of its own (no
+    tools): a failed or timed-out call cannot have changed anything.
+
+    Optional attributes ``secret_env`` (environment variable names) and
+    ``secret_files`` (paths) declare where this provider's credentials live, so
+    Kairo can keep them out of its state, logs and actions (kairo.redact)."""
+
     name: str
 
     def decide(self, context: Context) -> Decision: ...
 
 
 class CognitionError(Exception):
-    """A provider could not produce a valid decision. ``category`` is a short
-    machine-readable kind: unavailable, timeout, process_failed, empty_output,
-    invalid_output, model_error, invalid_decision."""
+    """A provider could not produce a usable decision. ``category`` is one of
+    OUTCOMES; anything else is treated as provider_error."""
 
     def __init__(self, category: str, message: str) -> None:
         super().__init__(message)
         self.category = category
+
+
+log = logging.getLogger("kairo.cognition")
+
+# Why a provider produced no usable decision. Closed vocabulary.
+#
+# Fallback is for technical failures only: the provider could not be used, or
+# what came back is not a decision Kairo can use at all. It is never a judgment
+# of quality: Kairo never compares two valid decisions, and never routes around
+# a model that answered.
+#
+# invalid_decision falls back: an answer that breaks the decision contract is
+# no decision (a runtime-checked, binary fact, like invalid_output), so trying
+# the next provider replaces "nothing usable" with something usable, not one
+# opinion with another. model_error does NOT fall back: the model ran and
+# declined or failed to answer (a refusal, a safety block, a provider-reported
+# model failure); sending the same request to another model to get around that
+# would be shopping for an answer.
+FALLBACK = frozenset({
+    "unavailable",       # the provider could not be reached or started
+    "timeout",           # no answer within the provider's timeout
+    "process_failed",    # the provider's process or transport failed
+    "auth_failed",       # credentials missing, expired or rejected
+    "rate_limited",      # throttled or overloaded
+    "empty_output",      # nothing came back
+    "invalid_output",    # what came back is not a provider answer at all
+    "invalid_decision",  # an answer, but not a valid Kairo decision
+    "provider_error",    # the adapter itself failed unexpectedly
+})
+TERMINAL = frozenset({
+    "model_error",       # the model declined or failed to answer
+})
+OUTCOMES = FALLBACK | TERMINAL
+DETAIL_LIMIT = 300  # characters of failure detail kept per attempt
+
+
+def validate_decision(decision: Any) -> Decision:
+    """What every provider's answer must be, whatever the provider."""
+    if not isinstance(decision, Decision):
+        raise CognitionError("invalid_decision",
+                             f"decide() returned {type(decision).__name__}, not Decision")
+    if not all(isinstance(a, Action) for a in decision.actions):
+        raise CognitionError("invalid_decision",
+                             "Decision.actions must contain only Action instances")
+    if not isinstance(decision.work, list):
+        raise CognitionError("invalid_decision", "Decision.work must be a list")
+    return decision
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """One provider call within a cycle. Runtime facts only."""
+
+    provider: str
+    outcome: str          # "decided", or one of OUTCOMES
+    fallback: bool        # whether this outcome let the next provider be tried
+    seconds: float
+    detail: str | None = None  # bounded, redacted failure message
+
+
+@dataclass(frozen=True)
+class CognitionResult:
+    """What Kairo's cognition produced this cycle: at most one Decision, from at
+    most one provider, and how it came to be that one."""
+
+    decision: Decision | None
+    provider: str | None                 # the provider whose Decision is used
+    selection: dict[str, Any] | None     # {"position", "reason"} of that provider
+    attempts: list[Attempt]
+    failure: str | None = None           # outcome of the last attempt, if none decided
+
+    def summary(self) -> dict[str, Any]:
+        """The provenance recorded with the cycle."""
+        return {"provider": self.provider, "selection": self.selection,
+                "attempts": [dataclasses.asdict(a) for a in self.attempts]}
+
+
+class Cognition:
+    """Kairo's cognition: asks providers, in order, for this cycle's decision.
+
+    Not a provider and not an agent: it reasons about nothing and changes no
+    state. It owns which providers are asked, in what order, whether a failure
+    lets the next one be asked, and the record of what happened. Each provider is
+    asked at most once per cycle, every cycle starts from the beginning of the
+    order, and the first usable Decision is the one used."""
+
+    def __init__(self, providers: Sequence[CognitionProvider]) -> None:
+        names = [getattr(p, "name", None) for p in providers]
+        if not providers:
+            raise ValueError("cognition needs at least one provider")
+        if not all(isinstance(n, str) and n for n in names) or len(set(names)) != len(names):
+            raise ValueError(f"provider names must be non-empty and unique: {names}")
+        self.providers = list(providers)
+        # Providers' credentials: always redacted, never given to actions.
+        protect_env(self.secret_env())
+        protect_files({path for p in self.providers for path in getattr(p, "secret_files", ())})
+
+    @property
+    def names(self) -> list[str]:
+        return [p.name for p in self.providers]
+
+    def secret_env(self) -> set[str]:
+        return {name for p in self.providers for name in getattr(p, "secret_env", ())}
+
+    def order(self, context: Context) -> list[CognitionProvider]:
+        """Which providers to ask, in what order. Phase 7: the configured order,
+        unchanged. A dynamic policy would replace only this method."""
+        return list(self.providers)
+
+    def decide(self, context: Context) -> CognitionResult:
+        attempts: list[Attempt] = []
+        for position, provider in enumerate(self.order(context)):
+            previous = attempts[-1] if attempts else None
+            reason = ("first_in_order" if previous is None
+                      else f"fallback_after:{previous.provider}:{previous.outcome}")
+            # The same gathered Context for every attempt; only the runtime fact
+            # of who is being asked, and why, differs.
+            asked = dataclasses.replace(context, runtime={
+                **context.runtime, "cognition": {"provider": provider.name, "selected": reason}})
+            started = time.monotonic()
+            try:
+                decision = validate_decision(provider.decide(asked))
+            except Exception as exc:
+                category = getattr(exc, "category", None)
+                if category not in OUTCOMES:
+                    category = "provider_error"
+                if isinstance(exc, CognitionError):
+                    log.error("cognition provider %s failed (%s): %s",
+                              provider.name, category, redact(str(exc), limit=DETAIL_LIMIT))
+                    detail = str(exc)
+                else:  # an adapter bug: keep the traceback, but redacted
+                    log.error("cognition provider %s failed: %s", provider.name,
+                              redact(traceback.format_exc(), limit=4000))
+                    detail = repr(exc)
+                attempts.append(Attempt(provider.name, category, category in FALLBACK,
+                                        round(time.monotonic() - started, 3),
+                                        redact(detail, limit=DETAIL_LIMIT)))
+                if category not in FALLBACK:
+                    break
+                continue
+            attempts.append(Attempt(provider.name, "decided", False,
+                                    round(time.monotonic() - started, 3)))
+            return CognitionResult(decision, provider.name,
+                                   {"position": position, "reason": reason}, attempts)
+        last = attempts[-1]
+        return CognitionResult(None, None, None, attempts, failure=last.outcome)
+
+
+def as_cognition(cognition: Any) -> Cognition | None:
+    """A Cognition for whatever was configured: itself, a single provider (asked
+    alone), or None."""
+    if cognition is None or isinstance(cognition, Cognition):
+        return cognition
+    return Cognition([cognition])
 
 
 # -- decisions from providers ------------------------------------------------

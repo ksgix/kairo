@@ -7,7 +7,7 @@
     Print the situation cognition would be shown now (bounded and redacted),
     without starting the runtime or calling any provider.
 
-``python -m kairo --run [--db PATH] [--socket PATH] [--reassess SECONDS] [--cognition claude]``
+``python -m kairo --run [--db PATH] [--socket PATH] [--reassess SECONDS] [--cognition ORDER]``
     Operate continuously in the foreground until SIGINT (Ctrl-C), SIGTERM or
     an IPC stop request. Other local processes reach it through the Unix
     socket (see ``kairo.ipc``). Without ``--cognition`` Kairo has no cognition
@@ -24,8 +24,8 @@ import signal
 import sys
 from pathlib import Path
 
-from kairo.claude import ClaudeCognition
-from kairo.cognition import CognitionProvider
+from kairo.cognition import Cognition
+from kairo.registry import PROVIDERS, build_cognition
 from kairo.ipc import DEFAULT_SOCKET, IPCError, IPCServer
 from kairo.memory import Memory
 from kairo.runtime import Runtime
@@ -47,12 +47,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--socket", type=Path, default=DEFAULT_SOCKET,
                         help="with --run: Unix socket for local IPC "
                              "(default: $KAIRO_SOCKET or %(default)s)")
-    parser.add_argument("--cognition", choices=["none", "claude"], default="none",
-                        help="cognition provider (default: none)")
-    parser.add_argument("--model", help="with --cognition claude: model alias or name "
+    parser.add_argument("--cognition", default="none", metavar="ORDER",
+                        help="cognition providers in the order they are asked, comma-separated "
+                             "(later ones only on technical failure of earlier ones), e.g. "
+                             f"claude or claude,claude@haiku; known: {', '.join(sorted(PROVIDERS))} "
+                             "(default: none)")
+    parser.add_argument("--provider-opt", action="append", default=[], metavar="ID.KEY=VALUE",
+                        help="a provider option, e.g. claude@haiku.model=haiku (repeatable; "
+                             "never credentials)")
+    parser.add_argument("--model", help="shortcut: model for every claude provider "
                                         "(default: the Claude CLI's default)")
     parser.add_argument("--cognition-timeout", type=float, default=300.0, metavar="SECONDS",
-                        help="with --cognition claude: max seconds per decision "
+                        help="shortcut: max seconds per decision for every claude provider "
                              "(default: %(default)s)")
     args = parser.parse_args(argv)
     if args.reassess < 0:
@@ -60,10 +66,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.cognition_timeout <= 0:
         parser.error("--cognition-timeout must be > 0")
 
-    cognition: CognitionProvider | None = None
-    if args.cognition == "claude":
-        cognition = ClaudeCognition(model=args.model, timeout=args.cognition_timeout,
-                                    workdir=args.db.parent)
+    claude_defaults = {"timeout": str(args.cognition_timeout)}
+    if args.model:
+        claude_defaults["model"] = args.model
+    try:
+        cognition = build_cognition(args.cognition, args.provider_opt,
+                                    defaults={"claude": claude_defaults}, workdir=args.db.parent)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     memory = Memory(args.db)
     try:
@@ -79,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(memory: Memory, socket_path: Path, reassess_after: float | None,
-         cognition: CognitionProvider | None) -> int:
+         cognition: Cognition | None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     runtime = Runtime(memory, cognition=cognition, reassess_after=reassess_after)
     server = IPCServer(runtime, socket_path)
@@ -99,7 +109,7 @@ def _run(memory: Memory, socket_path: Path, reassess_after: float | None,
     return 0
 
 
-def _once(memory: Memory, db: Path, cognition: CognitionProvider | None) -> int:
+def _once(memory: Memory, db: Path, cognition: Cognition | None) -> int:
     runtime = Runtime(memory, cognition=cognition)
     runtime.start()
     runtime.cycle()
