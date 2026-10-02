@@ -241,6 +241,24 @@ sudo install -m 0755 deploy/kairo-fallback /usr/local/libexec/kairo-fallback
 sudo systemctl daemon-reload && sudo systemctl enable --now kairo.service
 ```
 
+The install needs systemd 254 or later (`RestartMode=direct`). It creates `/etc/systemd/system/kairo.service`, `/etc/systemd/system/kairo-fallback.service` and `/usr/local/libexec/kairo-fallback`; the unit runs as `kamin`, whose authority is unchanged.
+
+**Operating it:**
+
+- **Status:** `PYTHONPATH=/opt/kairo/src python3 -m kairo.ipc --socket /var/lib/kairo/kairo.sock status`. The reply includes `revision`: the release this process actually imported. `readlink /var/lib/kairo/deploy/current` and `.../previous` show the links.
+- **Logs:** `journalctl -u kairo -u kairo-fallback`.
+- **Stop:** `sudo systemctl stop kairo` (or IPC `stop`). SIGTERM reaches only the runtime (`KillMode=mixed`): it takes on nothing new, lets the current action or cognition call finish, and exits 0. There is no restart and no fallback.
+- **Exit status:**
+  - 75 means a deployment selected a new release; systemd starts `current` again at once.
+  - 3 means a just-deployed release could not use cognition before confirming itself.
+  - Any other non-zero status is a failure, and systemd restarts after 3 s.
+- **Crash-loop threshold:** more than 5 starts within 300 s makes the unit fail, and only then does `OnFailure=` run the fallback. Manual starts and restarts count too: after several in a row, run `sudo systemctl reset-failed kairo` so a manual restart cannot trip the fallback.
+- **After a fallback** (the journal shows `kairo-fallback: current switched from … to …`):
+  - Kairo runs the previous release again and records the deployment as failed (stage `confirmation`); its cognition sees that.
+  - `current` and `previous` are now the same, so a second fallback does nothing.
+  - If that release also cannot stay up, Kairo stays stopped. Read the journal before starting it again.
+  - The database is never touched. `deploy/snapshots/` holds the pre-switch copies if a deliberate restore is ever needed.
+
 Retention of old releases and snapshots is a later housekeeping concern.
 
 ## Situation model

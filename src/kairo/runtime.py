@@ -348,6 +348,9 @@ class Runtime:
                 "running": self._running,
                 "wake_at": self._wake_at if self.state is State.SLEEPING else None,
             }
+        deployment = self._deployment()
+        if deployment is not None:  # the release this process imported (not HEAD, not 'current')
+            snapshot["revision"] = deployment.running_revision
         cognition = as_cognition(self.cognition)
         last = (self.memory.get("runtime", "last_cycle") or {}).get("cognition") or {}
         return {

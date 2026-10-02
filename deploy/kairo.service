@@ -48,8 +48,13 @@ RestartMode=direct
 RestartSec=3
 SuccessExitStatus=75
 RestartForceExitStatus=75
+# A stop sends SIGTERM to the runtime only (mixed): it takes on nothing new, lets
+# the current action finish (bounded by its timeout) and exits 0. With the default
+# (control-group) every process in the unit gets SIGTERM, so an action in progress
+# would be killed and recorded as a failure it never had. Anything still running
+# when the runtime has exited, or after TimeoutStopSec, gets SIGKILL.
+KillMode=mixed
 KillSignal=SIGTERM
-# A stop lets the current action finish (actions are bounded by their timeouts).
 TimeoutStopSec=600
 
 [Install]

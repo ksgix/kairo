@@ -548,6 +548,11 @@ class RestartTest(unittest.TestCase):
         self.assertEqual(lifecycle["restart_for"], record["id"])
         self.assertIn("restart requested by deployment", lifecycle["reason"])
 
+    def test_16_status_reports_the_release_this_process_runs(self):
+        runtime = self.process(self.A, None)
+        self.assertEqual(runtime.status()["revision"], self.A)  # what IPC status shows
+        self.assertNotIn("revision", Runtime(Memory()).status())  # only with deployment configured
+
     def test_20_a_human_stop_exits_normally(self):
         runtime = self.process(self.A, Plan([Decision(sleep=True)]))
         thread = threading.Thread(target=runtime.run_forever, daemon=True)
@@ -797,7 +802,8 @@ class FallbackTest(unittest.TestCase):
         for forbidden in ("sqlite", ".db", "snapshot", "while ", "for ", "python", "claude"):
             self.assertNotIn(forbidden, "\n".join(code))
         unit = (ROOT / "deploy" / "kairo.service").read_text()
-        for line in ("Restart=on-failure", "RestartMode=direct", "RestartForceExitStatus=75",
+        for line in ("KillMode=mixed", "Restart=on-failure", "RestartMode=direct",
+                     "RestartForceExitStatus=75",
                      "SuccessExitStatus=75",
                      "StartLimitBurst=", "OnFailure=kairo-fallback.service"):
             self.assertIn(line, unit)
