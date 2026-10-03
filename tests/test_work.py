@@ -7,7 +7,6 @@ validation, persistence, linkage, continuity. No intelligence is simulated.
 
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,7 +20,7 @@ from kairo.cognition import CognitionError, decision_schema, parse_decision
 from kairo.environment import ACTIONS
 from kairo.redact import MARKER
 from kairo.situation import build_situation, render_situation
-from kairo.work import MAX_OPEN, MAX_REQUESTS, TEXT_LIMITS, WorkLedger
+from kairo.work import MAX_OPEN, MAX_REQUESTS, TEXT_LIMITS
 from test_continuous import SRC, TIMEOUT
 
 
@@ -214,10 +213,10 @@ class LifecycleTest(WorkCase):
     def test_blocked_is_kept_with_its_obstacle_and_can_resume(self):
         rt = self.runtime()
         wid = self.created(rt)
-        rt.work.apply([set_state(wid, "blocked", "needs root; runtime runs as kamin")])
+        rt.work.apply([set_state(wid, "blocked", "needs root; runtime runs as test-kairo-user")])
         w = only_open(build_situation(rt.context()))
         self.assertEqual((w["state"], w["state_reason"]),
-                         ("blocked", "needs root; runtime runs as kamin"))
+                         ("blocked", "needs root; runtime runs as test-kairo-user"))
         outcome = rt.work.apply([set_state(wid, "active", "permission granted")])
         self.assertEqual(outcome.rejected, [])
         self.assertEqual(rt.work.get(wid).state, "active")

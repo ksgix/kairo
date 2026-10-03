@@ -9,7 +9,6 @@ wording of any diagnosis.
 import contextlib
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import tempfile

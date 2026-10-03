@@ -29,7 +29,7 @@ import kairo
 from kairo import Action, ActionResult, Decision, Environment, Memory, Runtime, State
 from kairo import deploy
 from kairo.actions import INDETERMINATE, action_state, attempt_identity
-from kairo.cognition import CognitionError, Context
+from kairo.cognition import CognitionError
 from kairo.deploy import Deployment, _remove, _replace_link
 from kairo.directives import Directive
 from kairo.environment import ACTIONS
@@ -37,8 +37,8 @@ from kairo.implementations import Implementations
 from kairo.memory import DatabaseLocked, from_record, lock_database
 from kairo.redact import protect_env, redact
 from kairo.situation import build_situation, render_situation
-from kairo.work import Work, WorkLedger, work_from_record
-from test_work import Script, create, set_state, update
+from kairo.work import WorkLedger, work_from_record
+from test_work import create, set_state, update
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = Path(kairo.__file__).resolve().parent
@@ -798,6 +798,15 @@ class FallbackTest(unittest.TestCase):
         self.assertEqual(self.fallback().returncode, 0)
         self.assertEqual(self.current(), "releases/" + "b" * 40)
         self.assertEqual(self.started(), [])
+
+    def test_unit_template_has_only_the_documented_placeholders(self):
+        unit = (ROOT / "deploy" / "kairo.service").read_text()
+        self.assertEqual(set(re.findall(r"@[A-Z_]+@", unit)), {"@KAIRO_USER@", "@KAIRO_HOME@"})
+        self.assertIn("User=@KAIRO_USER@\n", unit)
+        rendered = unit.replace("@KAIRO_USER@", "test-kairo-user").replace("@KAIRO_HOME@",
+                                                                          "/home/test-kairo-user")
+        self.assertNotRegex(rendered, r"@[A-Z_]+@")  # what README's sed step produces
+        self.assertIn("claude.executable=/home/test-kairo-user/.local/bin/claude'", rendered)
 
     def test_the_fallback_is_tiny_and_never_touches_the_database(self):
         text = FALLBACK.read_text()

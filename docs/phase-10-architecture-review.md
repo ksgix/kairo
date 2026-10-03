@@ -1,7 +1,7 @@
 # Phase 10 architecture review: human interface and external interaction
 
 Status: architecture review only, no implementation.
-Reviewed: repository at `22d0a8b` (Phase 9 plus production installation), and the production installation on this host on 2026-10-02.
+Reviewed: repository at `22d0a8b` (Phase 9 plus production installation), and its production deployment running under the documented systemd configuration.
 
 ## 1. Executive summary
 
@@ -11,7 +11,7 @@ The prompt for this review assumed Phase 10 is "a human interface plus external 
 
 - The human interface is almost write-only. Over IPC a human can send a message, wake Kairo or stop it, but cannot read Kairo's replies. Replies exist only as `message` records in SQLite.
 - There is no operator path for directives or todo. `Directives.add` and `Todo.add` exist only as Python methods.
-- Directives are Kairo's lasting purpose source, so production Kairo has no purpose source except chat. On 2026-10-02 it ran 41 cycles with 0 directives, 0 messages and 0 actions, spending $2.81 of cognition to conclude correctly each time that nothing was worth doing.
+- Directives are Kairo's lasting purpose source, so production Kairo has no purpose source except chat. With no directives it ran only idle reassessment cycles, with no messages and no actions, each one a paid cognition call that concluded, correctly, that nothing was worth doing.
 - The missing piece is a complete operator boundary, not a richer view.
 
 **External side: the gaps are small and concrete.**
@@ -105,14 +105,14 @@ All of this was verified in code (`src/kairo`, about 5,000 lines, standard libra
 - systemd restarts the process, and the successor confirms the deployment.
 - systemd owns process lifetime; the fallback owns one release switch; Kairo owns everything else.
 - **Production:** release `22d0a8b`, operator-selected, no deployments yet.
-- **Production:** the reboot on 2026-10-02 09:40 brought Kairo back automatically with no fallback.
+- **Production:** a host reboot brought Kairo back automatically under the enabled unit, with no fallback.
 
 ### Other production facts relevant to Phase 10
 
-- Only SSH (port 22) listens on the network. Caddy runs, but with global options only and no sites.
-- A human reaches Kairo today only through SSH, then the Unix socket, or by reading SQLite directly.
+- Kairo itself exposes nothing on the network: the IPC socket is local, and no web interface exists. The host's own network exposure is an operational matter, reviewed separately from this design.
+- A human reaches Kairo today only through a shell on the host (for example SSH), then the Unix socket, or by reading SQLite directly.
 - The unit file has no `EnvironmentFile`.
-- `kairo.db` is mode 0644 inside a 0755 directory.
+- Nothing sets a restrictive mode on the database file or its directory: they are created with the process umask, so whether other local accounts can read them depends on host defaults.
 
 ## 3. Current boundaries, and the weaknesses this review found
 
@@ -120,10 +120,10 @@ All of this was verified in code (`src/kairo`, about 5,000 lines, standard libra
 |---|---|---|
 | W1 | The human interface is write-mostly: a human can send a message but cannot read the reply | `ipc.py` has only `status`, `message`, `wake`, `stop`; `Decision.replies` are posted to the `message` kind (`runtime.py`, `for reply in decision.replies`) and no client reads them |
 | W2 | No operator path for directives or todo | no caller of `Directives.add`, `set_active` or `Todo.add` outside tests; production has 0 directives; README says todo is "maintained by the operator" with no means to do it |
-| W3 | With no purpose source, Kairo pays to rediscover that nothing matters | 41 cycles, all `decided`, 0 actions, $2.81 on 2026-10-02 (cognition stretched its own wake interval to about 30 min, which is correct behaviour; the cost comes from having no directives) |
+| W3 | With no purpose source, Kairo pays to rediscover that nothing matters | idle cycles, all `decided`, 0 actions, each a paid cognition call (cognition stretched its own wake interval to about 30 min, which is correct behaviour; the cost comes from having no directives) |
 | W4 | External content is framed as fact | `instructions.py`: "Treat runtime records and observations as facts"; `history.actions` shows stdout and stderr with no content label. Today only `process.run` output (e.g. `curl`) is affected; it matters for every integration |
 | W5 | Implementation tools cannot be idempotent towards external systems | `_run_implementation` passes `json.dumps(action.params)` on stdin and no action id; the `verify` command also gets no id |
-| W6 | Implementation secrets cannot be supplied in production | `deploy/kairo.service` has no `EnvironmentFile`; the only option today is `Environment=` in a world-readable (0644) unit file |
+| W6 | Implementation secrets cannot be supplied in production | `deploy/kairo.service` has no `EnvironmentFile`; the only option today is `Environment=` in the unit file, and unit files are world-readable by convention |
 | W7 | Message intake is not idempotent | `Chat.post` always mints a new uuid, so a client retrying after a timeout duplicates the message; harmless for a human, fatal for event intake |
 | W8 | `--situation` reports the wrong running revision under deployment | it computes the release from the *invoking* process's code, not the service's. The authoritative projection must come from the live process |
 | W9 | Conversation continuity is the last 20 messages | `LIMITS.messages = 20`; there is no long-term memory (`knowledge` is empty by design) |
@@ -328,7 +328,7 @@ external sender ──(network)──> ingress adapter (separate process; verifi
 
 ## 11. Security model
 
-Kairo keeps root-level authority (it runs as `kamin` with passwordless sudo). Phase 10 does not redesign that, and it cannot pretend to sandbox external interaction. What it can do is keep these four things distinguishable and auditable:
+Kairo keeps the root-equivalent authority it is designed to have (its service user can act as root). Phase 10 does not redesign that, and it cannot pretend to sandbox external interaction. What it can do is keep these four things distinguishable and auditable:
 
 | What | Where it lives |
 |---|---|
@@ -340,9 +340,9 @@ Kairo keeps root-level authority (it runs as `kamin` with passwordless sudo). Ph
 **Specific positions:**
 
 - **The human channel is root-equivalent.** A message can lead Kairo to do anything Kairo can do.
-  - The IPC socket's protection (0600, user `kamin`) plus SSH is therefore the operator authentication.
+  - The IPC socket's protection (0600, the Kairo service user) plus SSH is therefore the operator authentication.
   - Any web UI added later is a root-equivalent surface: it must be bound to localhost and reached through an SSH tunnel, or sit behind real authentication. It must never be exposed directly.
-  - Caddy is present but serves nothing today. Exposing a UI through it is a deliberate security decision, not a default.
+  - A reverse proxy or web server already running on the host is no reason to expose a UI through it. Doing so is a deliberate security decision, never a default.
 - **Credentials:**
   - never in SQLite, the situation, IPC responses, the UI or git;
   - kept in a root 0600 `EnvironmentFile`;
@@ -618,7 +618,7 @@ Not touched: `work.py` semantics, `memory.py` schema, `deploy.py`, the providers
 
 ## 24. Open questions
 
-1. Is the human interface for Phase 10 the terminal over SSH (recommended), or is a browser required now (then 19.B's adapter becomes required, with a decision on access: SSH tunnel versus Caddy plus authentication)?
+1. Is the human interface for Phase 10 the terminal over SSH (recommended), or is a browser required now (then 19.B's adapter becomes required, with a decision on access: SSH tunnel versus a reverse proxy with authentication)?
 2. Should todo remain? It is operator-defined but unused, and directives plus messages cover influence. Either give it IPC operations or retire it explicitly.
 3. Should cognition ever propose directives? This review keeps directives operator-owned. Kairo can suggest one in a reply.
 4. Which external integration is first? It determines whether 19.B's `effects` field and an inbound path are needed in Phase 11.

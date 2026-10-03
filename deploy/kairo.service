@@ -1,9 +1,12 @@
 # Kairo Runtime under systemd: the external supervisor for self-deployment.
 #
-# Install (operator, once; adjust paths and user to the host):
-#   sudo install -m 0644 deploy/kairo.service deploy/kairo-fallback.service /etc/systemd/system/
-#   sudo install -m 0755 deploy/kairo-fallback /usr/local/libexec/kairo-fallback
-#   sudo systemctl daemon-reload && sudo systemctl enable --now kairo.service
+# deploy/kairo.service in the repository is a template. Two values are filled in
+# once, at install time (README, "Install on a host", renders them with sed):
+#   service user:   @KAIRO_USER@   (the account Kairo runs as; its Claude CLI
+#                                   login is Kairo's cognition)
+#   its home:       @KAIRO_HOME@
+# An unrendered template never runs: no account has the placeholder's name, so
+# the service fails to start (status 217/USER).
 #
 # Layout (see README, "Self-maintenance"):
 #   /var/lib/kairo/kairo.db        the one authoritative database (locked by the runtime)
@@ -22,7 +25,7 @@
 # A deploy restart is minutes apart (preflight runs the suite twice); a crash loop
 # (RestartSec=3) reaches the start limit in seconds.
 #
-# Kairo keeps its broad authority over this host. This unit and the fallback exist
+# Kairo keeps its broad authority over the host. This unit and the fallback exist
 # so Kairo can be restarted and recovered when its own code is broken: a
 # reliability boundary, not a security boundary.
 
@@ -36,13 +39,13 @@ OnFailure=kairo-fallback.service
 
 [Service]
 Type=simple
-User=kamin
-Group=kamin
+User=@KAIRO_USER@
+Group=@KAIRO_USER@
 WorkingDirectory=/var/lib/kairo
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 # The release is resolved once, at start, so the process imports one immutable release.
-ExecStart=/bin/sh -c 'release=$$(readlink -f /var/lib/kairo/deploy/current) && exec env PYTHONPATH="$$release/src" /usr/bin/python3 -m kairo --run --db /var/lib/kairo/kairo.db --socket /var/lib/kairo/kairo.sock --repository /var/lib/kairo/dev --releases /var/lib/kairo/deploy --cognition claude --provider-opt claude.executable=/home/kamin/.local/bin/claude'
+ExecStart=/bin/sh -c 'release=$$(readlink -f /var/lib/kairo/deploy/current) && exec env PYTHONPATH="$$release/src" /usr/bin/python3 -m kairo --run --db /var/lib/kairo/kairo.db --socket /var/lib/kairo/kairo.sock --repository /var/lib/kairo/dev --releases /var/lib/kairo/deploy --cognition claude --provider-opt claude.executable=@KAIRO_HOME@/.local/bin/claude'
 Restart=on-failure
 RestartMode=direct
 RestartSec=3

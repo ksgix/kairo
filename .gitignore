@@ -27,3 +27,18 @@ var/
 *.key
 credentials*
 secrets*
+
+# Test and type-checker caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editor and OS leftovers
+*.swp
+*~
+*.orig
+*.bak
+.DS_Store
+.idea/
+.vscode/

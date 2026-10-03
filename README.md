@@ -231,17 +231,28 @@ It contains no diffs, logs or source.
 
 **Install on a host** (operator, once):
 
+Run as the account Kairo will run as, from `/opt/kairo`. That account's Claude CLI login is Kairo's cognition.
+
 ```sh
-sudo mkdir -p /var/lib/kairo && sudo chown kamin: /var/lib/kairo
+KAIRO_USER=$(id -un); KAIRO_HOME=$(getent passwd "$KAIRO_USER" | cut -d: -f6)
+sudo mkdir -p /var/lib/kairo && sudo chown "$KAIRO_USER": /var/lib/kairo
 git -C /opt/kairo worktree add /var/lib/kairo/dev -b kairo/dev       # development worktree
 PYTHONPATH=/opt/kairo/src python3 -m kairo --init-release "$(git -C /var/lib/kairo/dev rev-parse HEAD)" \
     --repository /var/lib/kairo/dev --releases /var/lib/kairo/deploy   # first release -> current
-sudo install -m 0644 deploy/kairo.service deploy/kairo-fallback.service /etc/systemd/system/
+sed -e "s|@KAIRO_USER@|$KAIRO_USER|g" -e "s|@KAIRO_HOME@|$KAIRO_HOME|g" deploy/kairo.service \
+    | sudo install -m 0644 /dev/stdin /etc/systemd/system/kairo.service   # render the template
+sudo install -m 0644 deploy/kairo-fallback.service /etc/systemd/system/
 sudo install -m 0755 deploy/kairo-fallback /usr/local/libexec/kairo-fallback
 sudo systemctl daemon-reload && sudo systemctl enable --now kairo.service
 ```
 
-The install needs systemd 254 or later (`RestartMode=direct`). It creates `/etc/systemd/system/kairo.service`, `/etc/systemd/system/kairo-fallback.service` and `/usr/local/libexec/kairo-fallback`; the unit runs as `kamin`, whose authority is unchanged.
+- **Requirements:** systemd 254 or later (`RestartMode=direct`).
+- **What it installs:** `/etc/systemd/system/kairo.service`, `/etc/systemd/system/kairo-fallback.service` and `/usr/local/libexec/kairo-fallback`.
+- **The unit template:**
+  - `deploy/kairo.service` has two placeholders, `@KAIRO_USER@` (the Kairo service user) and `@KAIRO_HOME@` (its home directory, where the Claude CLI lives), and the `sed` step renders them.
+  - The service user's authority is unchanged.
+  - An unrendered unit never runs: no account has the placeholder's name, so the service fails to start (status `217/USER`).
+  - To check an installed unit against the template, render it the same way and `diff` the result with `/etc/systemd/system/kairo.service`.
 
 **Operating it:**
 
@@ -385,7 +396,7 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
 
 **Trust boundary:**
 
-- Whoever can open the socket is the operator. That means mode 0600 and the runtime's user (`kamin`, which has sudo).
+- Whoever can open the socket is the operator. That means mode 0600 and the Kairo service user, which normally has sudo, because Kairo is designed to run with broad authority.
 - The operator's messages can lead Kairo, which has broad authority on this host, to do anything it can do, so the socket is root-equivalent.
 - There is no authentication beyond file permissions, and no network exposure.
 - A future browser interface would be a separate, stateless HTTP-to-IPC translator reached through an SSH tunnel or real authentication (see `docs/phase-10-architecture-review.md`). It is not part of this phase.
