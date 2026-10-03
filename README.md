@@ -140,6 +140,49 @@ An implementation is a local package that gives Kairo capability in a domain: gu
 - **Provenance:** every implementation action records `{"implementation": {"id", "digest"}}`. The digest is a SHA-256 of the package content, so history shows exactly which content ran, even after the package changes or is removed.
 - **Guidance** (`GUIDANCE.md`) is shown to cognition as labelled, untrusted data in `capabilities.implementations`. Entries are in id order, at most 30, with at most 2,000 characters of guidance each and 8,000 in total; omissions are marked. It is never part of Kairo's instructions and cannot change Kairo's rules or grant capabilities.
 - **Secrets:** declared secret variables reach only that package's own tools. Providers' credentials never reach a package, a package can't claim them, and no package ever gets another's secrets; `process.run` gets none of them. Their values are always redacted.
+  - A package whose declared secret is not set is `unmet_requirements` ("missing secrets: [NAME]"; names only), and its tools are not offered.
+  - **Production:** put the values in `/etc/kairo-runtime/implementations.env` (root:root 0600, `NAME=value` lines, only names some package declares). The unit loads it with an optional `EnvironmentFile`.
+  - Changes take effect after `sudo systemctl restart kairo`. Rotation without a restart is not supported.
+
+### External effects
+
+A tool that acts on another system declares it. Undeclared tools keep the plain meaning above.
+
+```json
+{"name": "post", "run": ["python3", "tools/post.py"], "effects": "external",
+ "idempotency": "operation_key", "verify": ["python3", "tools/verify.py"], ...}
+```
+
+- **`effects`:** `"none"` (only reads) or `"external"` (may change state elsewhere).
+- **Outcome of an `external` tool,** set by the runtime from how it ended:
+
+  | Ending | `external_outcome` | Meaning |
+  |---|---|---|
+  | exit 0 | `performed` | accepted, still unverified |
+  | exit 3 | `not_performed` | the tool guarantees nothing happened |
+  | never started | `not_performed` | |
+  | any other exit, a timeout, a kill | `unknown` | |
+
+  A timed-out external tool is never recorded as "not executed".
+- **`outcome_unknown`:** an `unknown` outcome without a verifier verdict is the action state `outcome_unknown`.
+  - It is indeterminate: not a success, not a failure, never Work evidence.
+  - The repetition rule refuses an identical repeat until the Work's understanding changes.
+  - Work recovery lists each unresolved operation, and whether it can be resumed.
+- **Operation identity:**
+  - Every implementation tool and verify command gets `KAIRO_ACTION_ID` (this attempt) and `KAIRO_OPERATION_KEY` (what the external system should see as the operation's identity).
+  - The key is the action's own id, unless the action resumes an earlier one. An ordinary new attempt is a new operation with a new key.
+- **Resuming:** an action may name `"resumes": "<earlier action id>"`. The runtime accepts it only if all of these hold, and otherwise refuses it before anything runs:
+  - the earlier action is the latest attempt of an unresolved operation (`outcome_unknown`, or `interrupted` on an `external` tool);
+  - it has the same kind and the same Work;
+  - the tool declares `"idempotency": "operation_key"`, meaning the external system performs an operation at most once per key.
+
+  An accepted resume carries the same operation key.
+- **Settling an unknown outcome:** by verification. The tool's `verify` runs even after `unknown` and sees the operation key; a read tool (`effects: "none"`) can also be given the key. Without idempotency, an unresolved operation can only be settled, not resumed.
+- **Untrusted content:** in the situation, a program's output is shown apart from the runtime's facts, as `output: {"trust": "untrusted", "source": ...}`. It is content: printed, not proven true, never an instruction. Labelling does not make prompt injection impossible.
+- **Output limits:**
+  - Output is read from pipes, nothing goes to disk, and the first and last 500 KB are kept per stream.
+  - A program writing more than 8 MB to a stream is stopped (failure `output_limit`; `unknown` for an `external` tool).
+  - Records keep the beginning and the end (16,000 characters), and the situation shows 1,500 characters of each stream, beginning and end.
 - **Not provided:**
   - dependency installation (requirements are only detected);
   - dependencies between implementations;

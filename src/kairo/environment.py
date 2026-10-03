@@ -7,6 +7,7 @@ refused is that no executor understands its kind yet.
 
 from __future__ import annotations
 
+import dataclasses
 import getpass
 import json
 import os
@@ -16,11 +17,12 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 
 from kairo import deploy
-from kairo.actions import Action, ActionResult
+from kairo.actions import NOT_PERFORMED_EXIT, Action, ActionResult
 from kairo.implementations import (
     PREFIX, ImplementationError, Implementations, Operation, Package, check_action_params,
     check_params,
@@ -29,7 +31,9 @@ from kairo.redact import env_owner, protected_files, scrubbed_env
 from kairo.verification import Outcome, Verification
 
 DEFAULT_TIMEOUT = 300.0  # seconds; an action must never block the runtime forever
-MAX_CAPTURE = 1_000_000  # bytes of stdout / stderr read back (records keep far less)
+MAX_CAPTURE = 1_000_000  # bytes of stdout / stderr kept per stream: its head and its tail
+OUTPUT_LIMIT = 8_000_000  # bytes a program may write to one stream before it is stopped
+PUMP_JOIN = 2.0  # seconds to wait for output still held open by an escaped descendant
 
 # The action interface, described for cognition. Keys are Action.kind values;
 # "params" is a JSON Schema for Action.params.
@@ -88,6 +92,17 @@ class Environment:
         except ImplementationError:
             return None
         return {"id": package.id, "digest": package.digest}
+
+    def tool_profile(self, kind: str) -> dict[str, str | None] | None:
+        """What an implementation tool declares about its effects outside this host
+        (``effects``, ``idempotency``); None for anything that is not a tool."""
+        try:
+            _, tool = self._resolve(kind)
+        except ImplementationError:
+            return None
+        if tool is None:
+            return None
+        return {"effects": tool.effects, "idempotency": tool.idempotency}
 
     def verifier(self, kind: str) -> Any:
         """The verifier this environment supplies for one of its action kinds:
@@ -170,10 +185,10 @@ class Environment:
             return ActionResult(action.id, executed=False, error=str(exc), failure="invalid_params")
         provenance = {"id": package.id, "digest": package.digest}
         result = _execute(action.id, _argv(package, tool.run), cwd=str(package.path),
-                          env=_package_env(package), timeout=tool.timeout,
+                          env=_operation_env(package, action), timeout=tool.timeout,
                           stdin=json.dumps(action.params).encode())
-        return ActionResult(result.action_id, result.executed, result.output, result.error,
-                            result.failure, implementation=provenance)
+        result = dataclasses.replace(result, implementation=provenance)
+        return _external_outcome(result) if tool.effects == "external" else result
 
 
 def _execute(action_id: str, argv: list[str], *, cwd: str | None, env: dict[str, str],
@@ -185,12 +200,45 @@ def _execute(action_id: str, argv: list[str], *, cwd: str | None, env: dict[str,
         return ActionResult(action_id, executed=False, error=str(exc), failure="not_found")
     except PermissionError as exc:
         return ActionResult(action_id, executed=False, error=str(exc), failure="permission_denied")
-    except subprocess.TimeoutExpired as exc:
-        return ActionResult(action_id, executed=False, error=str(exc), failure="timed_out")
+    except subprocess.TimeoutExpired as exc:  # stopped: keep what it printed before
+        return ActionResult(action_id, executed=False, error=str(exc), failure="timed_out",
+                            output=_partial(exc.output, exc.stderr))
+    except OutputLimitExceeded as exc:
+        return ActionResult(action_id, executed=False, error=str(exc), failure="output_limit",
+                            output=_partial(exc.stdout, exc.stderr))
     except (OSError, ValueError) as exc:
         return ActionResult(action_id, executed=False, error=str(exc), failure="os_error")
     return ActionResult(action_id, executed=True,
                         output={"returncode": returncode, "stdout": stdout, "stderr": stderr})
+
+
+def _partial(stdout: Any, stderr: Any) -> dict[str, Any]:
+    """What a stopped program had printed (it did not exit by itself)."""
+    return {"returncode": None,
+            "stdout": stdout if isinstance(stdout, str) else "",
+            "stderr": stderr if isinstance(stderr, str) else ""}
+
+
+def _external_outcome(result: ActionResult) -> ActionResult:
+    """For a tool declaring external effects: what happened outside, as far as the
+    runtime can tell from how the tool ended (never from what it printed).
+    exit 0: performed; exit 3 or never started: not performed; anything else,
+    including a timeout or a kill: unknown, and it did run."""
+    if result.executed:
+        code = result.output.get("returncode")
+        outcome = ("performed" if code == 0 else
+                   "not_performed" if code == NOT_PERFORMED_EXIT else "unknown")
+        return dataclasses.replace(result, external_outcome=outcome)
+    if result.failure in ("timed_out", "output_limit"):  # it ran and was stopped
+        return dataclasses.replace(result, executed=True, external_outcome="unknown")
+    return dataclasses.replace(result, external_outcome="not_performed")  # never started
+
+
+def _operation_env(package: Package, action: Action) -> dict[str, str]:
+    """A tool's (or its verify command's) environment: the package's own, plus the
+    identity of this attempt and of the external operation it carries out."""
+    return {**_package_env(package), "KAIRO_ACTION_ID": action.id,
+            "KAIRO_OPERATION_KEY": action.operation_key or action.id}
 
 
 def _argv(package: Package, run: tuple[str, ...]) -> list[str]:
@@ -228,7 +276,7 @@ class _VerifyCommand:
         try:
             code, _, stderr = run_contained(_argv(self.package, self.tool.verify or ()),
                                             cwd=str(self.package.path),
-                                            env=_package_env(self.package),
+                                            env=_operation_env(self.package, action),
                                             timeout=self.tool.timeout, stdin=payload)
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             return Verification(Outcome.UNVERIFIABLE, f"verify could not run: {exc}")
@@ -237,33 +285,126 @@ class _VerifyCommand:
                             {"verify_returncode": code, "verify_stderr": stderr[-300:]})
 
 
+class OutputLimitExceeded(OSError):
+    """A program wrote more than OUTPUT_LIMIT bytes to one stream and was stopped."""
+
+    def __init__(self, stdout: str, stderr: str) -> None:
+        super().__init__(f"stopped: wrote more than {OUTPUT_LIMIT} bytes of output")
+        self.stdout, self.stderr = stdout, stderr
+
+
+class _Capture:
+    """Reads one output pipe to its end on a thread, keeping its first and last
+    bytes (MAX_CAPTURE in all) and discarding the middle: memory is bounded and
+    nothing is written to disk. Past OUTPUT_LIMIT bytes it calls ``on_limit``."""
+
+    def __init__(self, fd: int, on_limit: Any) -> None:
+        self.fd, self.on_limit = fd, on_limit
+        self.head, self.tail = bytearray(), bytearray()
+        self.total = 0
+        self.exceeded = False
+        self._lock = threading.Lock()
+        self.thread = threading.Thread(target=self._pump, daemon=True)
+        self.thread.start()
+
+    def _pump(self) -> None:
+        head_max = MAX_CAPTURE // 2
+        tail_max = MAX_CAPTURE - head_max
+        try:
+            while chunk := os.read(self.fd, 65536):
+                with self._lock:
+                    self.total += len(chunk)
+                    room = head_max - len(self.head)
+                    if room > 0:
+                        self.head += chunk[:room]
+                        chunk = chunk[room:]
+                    if chunk:
+                        self.tail += chunk
+                        if len(self.tail) > tail_max:
+                            del self.tail[:len(self.tail) - tail_max]
+                    exceeded = self.total > OUTPUT_LIMIT and not self.exceeded
+                    if exceeded:
+                        self.exceeded = True
+                if exceeded:
+                    self.on_limit()
+        except OSError:
+            pass
+        finally:
+            os.close(self.fd)
+
+    def text(self) -> str:
+        with self._lock:
+            head, tail, total = bytes(self.head), bytes(self.tail), self.total
+        omitted = total - len(head) - len(tail)
+        if omitted <= 0:
+            return (head + tail).decode("utf-8", errors="replace")
+        return (head.decode("utf-8", errors="replace")
+                + f"\n[truncated {omitted} bytes in the middle]\n"
+                + tail.decode("utf-8", errors="replace"))
+
+
 def run_contained(argv: list[str], *, cwd: str | None, env: dict[str, str], timeout: float,
                   stdin: bytes | None = None) -> tuple[int, str, str]:
     """Run one program in its own process group, and kill that whole group when
     the program exits or its timeout passes, so nothing it started outlives the
-    action. Output goes to temporary files (not pipes), so a lingering child
-    cannot hold the action open. stdin is closed unless ``stdin`` is given.
+    action. stdin is closed unless ``stdin`` is given.
+
+    Output is read from pipes as it is written: the first and last bytes are
+    kept (MAX_CAPTURE per stream), the middle is discarded, and nothing goes to
+    disk. A program writing more than OUTPUT_LIMIT bytes to a stream is stopped
+    (OutputLimitExceeded). A descendant that escaped the group and still holds a
+    pipe cannot keep the action open longer than PUMP_JOIN.
 
     Containment is by process group only: a descendant that deliberately leaves
     the group (setsid, double fork) can escape. Stronger containment (cgroups,
     a systemd scope, a separate OS user) belongs to production hardening."""
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, \
-            tempfile.TemporaryFile() as inp:
+    with tempfile.TemporaryFile() as inp:  # stdin: the request, already bounded
         if stdin is not None:
             inp.write(stdin)
             inp.seek(0)
-        proc = subprocess.Popen(argv, stdin=inp if stdin is not None else subprocess.DEVNULL,
-                                stdout=out, stderr=err, cwd=cwd, env=env,
-                                start_new_session=True)
+        out_r, out_w = os.pipe()
+        err_r, err_w = os.pipe()
+        try:
+            proc = subprocess.Popen(argv, stdin=inp if stdin is not None else subprocess.DEVNULL,
+                                    stdout=out_w, stderr=err_w, cwd=cwd, env=env,
+                                    start_new_session=True)
+        except BaseException:
+            for fd in (out_r, out_w, err_r, err_w):
+                os.close(fd)
+            raise
+        os.close(out_w)
+        os.close(err_w)
+
+        def stop() -> None:  # from a capture thread: too much output
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        out, err = _Capture(out_r, stop), _Capture(err_r, stop)
         try:
             proc.wait(timeout=timeout)
-        except BaseException:  # timeout, or the runtime itself being interrupted
+        except BaseException as exc:  # timeout, or the runtime itself being interrupted
             _kill_group(proc.pid)
             proc.kill()  # the child itself, even if its group could not be signalled
             proc.wait()
+            _drain(out, err)
+            if isinstance(exc, subprocess.TimeoutExpired):
+                exc.output, exc.stderr = out.text(), err.text()
             raise
         _kill_group(proc.pid)  # anything it left running in the background
-        return proc.returncode, _read(out), _read(err)
+        _drain(out, err)
+        if out.exceeded or err.exceeded:
+            raise OutputLimitExceeded(out.text(), err.text())
+        return proc.returncode, out.text(), err.text()
+
+
+def _drain(*captures: _Capture) -> None:
+    """Let the capture threads reach the end of their pipes (bounded: a pipe held
+    by an escaped descendant is left to its thread)."""
+    deadline = time.monotonic() + PUMP_JOIN
+    for capture in captures:
+        capture.thread.join(max(deadline - time.monotonic(), 0))
 
 
 GROUP_EXIT_WAIT = 1.0  # seconds to wait for a killed group to be gone
@@ -283,11 +424,6 @@ def _kill_group(pgid: int) -> None:
         except (ProcessLookupError, PermissionError):
             return
         time.sleep(0.01)
-
-
-def _read(handle: Any) -> str:
-    handle.seek(0)
-    return handle.read(MAX_CAPTURE).decode("utf-8", errors="replace")
 
 
 def _names_credential_file(argv: list[str], cwd: str | None) -> str | None:

@@ -21,7 +21,19 @@ FAILURE_KINDS = frozenset({
     "invalid_params",     # the runtime refused the request before running anything
     "os_error",           # any other OS-level error
     "executor_error",     # the runtime's own executor raised
+    "output_limit",       # stopped: it wrote more output than the runtime captures
 })
+
+# What happened outside this host, for a tool that declares external effects
+# (implementations: "effects": "external"). Set by the runtime from how the tool
+# ended, never by cognition:
+#   performed       the tool exited 0: the external system accepted the operation
+#                   (not yet verified)
+#   not_performed   the tool exited 3, or never started: nothing was done outside
+#   unknown         anything else (another exit, a timeout, a kill): it may or may
+#                   not have happened, and only verification can tell
+EXTERNAL_OUTCOMES = frozenset({"performed", "not_performed", "unknown"})
+NOT_PERFORMED_EXIT = 3
 
 
 @dataclass(frozen=True)
@@ -33,12 +45,20 @@ class Action:
     # The ongoing work this action is an attempt at, if any. Set by the runtime
     # after it has validated the link; cognition only names the work it means.
     work_id: str | None = None
+    # An earlier action whose external outcome is unresolved, continued by this one
+    # (named by cognition; the runtime validates it before anything runs).
+    resumes: str | None = None
+    # The identity the external system sees for this operation: this action's own
+    # id, or, for a validated resume, the earlier operation's key. Set by the runtime.
+    operation_key: str | None = None
 
 
 @dataclass(frozen=True)
 class ActionResult:
     """Whether execution itself completed. Says nothing about the world state;
-    that is what verification is for."""
+    that is what verification is for. For a tool that declares external effects
+    and was stopped (timeout, output limit) ``executed`` is True: it ran, and
+    ``external_outcome`` says the outcome is unknown."""
 
     action_id: str
     executed: bool
@@ -48,6 +68,8 @@ class ActionResult:
     failure: str | None = None
     # For an implementation action: {"id", "digest"} of the package content run.
     implementation: dict[str, str] | None = None
+    # For a tool declaring external effects: one of EXTERNAL_OUTCOMES (runtime-set).
+    external_outcome: str | None = None
     # Set only by the runtime's own deploy executor: a new release was selected, so
     # this process must persist everything and exit for the supervisor to restart it.
     restart: bool = False
@@ -57,8 +79,10 @@ class ActionResult:
 SUCCEEDED = frozenset({"verified_successful", "executed_unverified"})
 FAILED = frozenset({"failed_to_execute", "verified_failed", "exited_nonzero"})
 # The runtime cannot tell whether these completed or what side effects occurred
-# (awaiting_confirmation: a deployment only the restarted runtime can verify).
-INDETERMINATE = frozenset({"interrupted", "in_progress", "awaiting_confirmation"})
+# (awaiting_confirmation: a deployment only the restarted runtime can verify;
+# outcome_unknown: an external operation that may or may not have happened).
+INDETERMINATE = frozenset({"interrupted", "in_progress", "awaiting_confirmation",
+                           "outcome_unknown"})
 
 
 def _returncode(record: dict[str, Any]) -> Any:
@@ -77,6 +101,11 @@ def action_state(record: dict[str, Any]) -> str:
             and isinstance(verification.get("evidence"), dict)
             and verification["evidence"].get("awaiting") == "successor"):
         return "awaiting_confirmation"
+    outcome = verification.get("outcome") if isinstance(verification, dict) else None
+    if (record.get("result") or {}).get("external_outcome") == "unknown":
+        # Only verification can settle what happened outside; never "not executed".
+        return {"success": "verified_successful", "failure": "verified_failed"}.get(
+            outcome, "outcome_unknown")
     if not (record.get("result") or {}).get("executed"):
         return "failed_to_execute"
     outcome = (record.get("verification") or {}).get("outcome")

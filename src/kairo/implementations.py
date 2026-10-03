@@ -56,7 +56,19 @@ SKIP_SUFFIXES = (".pyc",)
 
 MANIFEST_FIELDS = {"kairo_implementation", "id", "description", "version", "guidance",
                    "requires", "env", "tools", "checks"}
-TOOL_FIELDS = {"name", "description", "run", "params", "timeout", "verify"}
+TOOL_FIELDS = {"name", "description", "run", "params", "timeout", "verify", "effects",
+               "idempotency"}
+# What a tool declares about effects outside this host (optional; undeclared
+# tools keep the plain exit-code semantics):
+#   effects: "none"       it only reads or observes
+#   effects: "external"   it may change state elsewhere; it must exit 0 when the
+#                         operation was performed and 3 when it certainly was not
+#                         (anything else, a timeout or a kill: outcome unknown)
+#   idempotency: "operation_key"   (external tools only) the external system is
+#                         given KAIRO_OPERATION_KEY and performs an operation at
+#                         most once per key, so an unresolved operation may be resumed
+EFFECTS = frozenset({"none", "external"})
+IDEMPOTENCY = frozenset({"operation_key"})
 CHECK_FIELDS = {"name", "run", "timeout"}
 
 
@@ -148,6 +160,8 @@ class Operation:
     description: str = ""
     params: dict[str, Any] = field(default_factory=dict)
     verify: tuple[str, ...] | None = None
+    effects: str | None = None        # one of EFFECTS, or None (undeclared)
+    idempotency: str | None = None    # one of IDEMPOTENCY, or None
 
 
 @dataclass(frozen=True)
@@ -257,9 +271,19 @@ def _operation(root: Path, spec: Any, allowed: set[str], label: str) -> Operatio
     if label == "tool" and (not isinstance(description, str) or not description.strip()
                             or len(description) > TEXT["description"]):
         raise ImplementationError(f"tool {name!r}: description must be 1-{TEXT['description']} characters")
+    effects, idempotency = spec.get("effects"), spec.get("idempotency")
+    if effects is not None and effects not in EFFECTS:
+        raise ImplementationError(f"{label} {name!r}: effects must be one of {sorted(EFFECTS)}")
+    if idempotency is not None and idempotency not in IDEMPOTENCY:
+        raise ImplementationError(f"{label} {name!r}: idempotency must be one of "
+                                  f"{sorted(IDEMPOTENCY)}")
+    if idempotency is not None and effects != "external":
+        raise ImplementationError(f"{label} {name!r}: idempotency applies only to "
+                                  "effects: external")
     return Operation(name, _argv(root, spec["run"], f"{label} {name!r}"), float(timeout),
                      description, params,
-                     _argv(root, spec["verify"], f"{label} {name!r} verify") if "verify" in spec else None)
+                     _argv(root, spec["verify"], f"{label} {name!r} verify") if "verify" in spec else None,
+                     effects, idempotency)
 
 
 def _argv(root: Path, argv: Any, where: str) -> tuple[str, ...]:
@@ -402,6 +426,10 @@ class Implementations:
             elif missing := [c for c in package.commands if shutil.which(c) is None]:
                 entries[name] = Entry(package.id, "unmet_requirements",
                                       f"missing commands: {missing}", package)
+            elif absent := [n for n in package.secrets if not os.environ.get(n)]:
+                # Names only: a credential's value is never shown anywhere.
+                entries[name] = Entry(package.id, "unmet_requirements",
+                                      f"missing secrets: {absent}", package)
             else:
                 entries[name] = Entry(package.id, "available", None, package)
         if self.enabled != "all":
@@ -419,7 +447,9 @@ class Implementations:
             for tool in package.tools:
                 actions[action_kind(package.id, tool.name)] = {
                     "description": tool.description, "params": tool.params,
-                    "implementation": package.id}
+                    "implementation": package.id,
+                    **({"effects": tool.effects} if tool.effects else {}),
+                    **({"idempotency": tool.idempotency} if tool.idempotency else {})}
             if package.checks:
                 actions[action_kind(package.id, CHECK)] = {
                     "description": "Run one of this implementation's declared checks; "

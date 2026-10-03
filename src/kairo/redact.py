@@ -14,7 +14,16 @@ import re
 from pathlib import Path
 from typing import Any
 
-SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION", re.I)
+# An environment variable's name marks its value as secret when it contains one
+# of these (any case, anywhere: GITHUB_TOKEN2, APIKEYID, KEYPASS, accessKeyId) ...
+_SECRET_PART = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION")
+# ... outside these whole words, which contain one but name no secret. Exactly
+# these words are exempt, so the rule is never weaker than plain substring
+# matching except for them (GIT_AUTHOR_NAME, authorName, KEYBOARD_LAYOUT,
+# TOKENIZER_MODEL). Words split at non-letters and at camelCase boundaries.
+_NOT_SECRET_WORDS = frozenset({"AUTHOR", "AUTHORS", "AUTHORED", "AUTHORITY", "AUTHORITIES",
+                               "XAUTHORITY", "KEYBOARD", "KEYBOARDS", "TOKENIZER", "TOKENIZERS"})
+_NAME_WORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")
 MIN_SECRET_LENGTH = 8  # shorter values are too likely to match ordinary text
 MARKER = "[redacted]"
 FILE_SECRET_LENGTH = 20  # strings at least this long in a credential file are treated as secrets
@@ -91,13 +100,36 @@ def _file_secrets(path: str) -> frozenset[str]:
     return _file_cache[path][1]
 
 
+def secret_name(name: str) -> bool:
+    """Whether an environment variable's name marks its value as a secret."""
+    kept = _NAME_WORD.sub(lambda m: "_" if m.group().upper() in _NOT_SECRET_WORDS else m.group(),
+                          name)
+    return bool(_SECRET_PART.search(kept.upper()))
+
+
 def secret_values(environ: dict[str, str] | None = None) -> list[str]:
     env = os.environ if environ is None else environ
     values = {v for k, v in env.items()
-              if (SECRET_NAME.search(k) or k in _PROTECTED_ENV) and len(v) >= MIN_SECRET_LENGTH}
+              if (secret_name(k) or k in _PROTECTED_ENV) and len(v) >= MIN_SECRET_LENGTH}
     for path in _PROTECTED_FILES:
         values |= _file_secrets(path)
     return sorted(values, key=len, reverse=True)  # longest first: no partial leftovers
+
+
+def head_tail(text: Any, limit: int) -> Any:
+    """``text`` cut to at most ``limit`` characters keeping both its beginning and
+    its end (where results and errors usually are), with an explicit marker for
+    the middle left out. Unchanged when it fits, or when it is not a string.
+    Redact before cutting, so a secret can never be split across the cut."""
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    reserve = 48  # room for the marker
+    if limit <= reserve + 2:
+        return text[:limit]
+    head = (limit - reserve) // 2
+    tail = limit - reserve - head
+    marker = f"\n[truncated {len(text) - head - tail} chars in the middle]\n"
+    return text[:head] + marker + text[len(text) - tail:]
 
 
 def redact(value: Any, limit: int | None = None, secrets: list[str] | None = None) -> Any:

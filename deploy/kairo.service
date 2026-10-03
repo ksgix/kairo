@@ -44,6 +44,12 @@ Group=@KAIRO_USER@
 WorkingDirectory=/var/lib/kairo
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
+# Credentials for implementation packages (optional file; root:root 0600; only the
+# names packages declare as secret, one NAME=value per line). systemd reads it as
+# root; each value reaches only the package that declares its name, and is
+# redacted everywhere. A package whose declared secret is missing is not ready.
+# Changing it takes effect at the next start (systemctl restart kairo).
+EnvironmentFile=-/etc/kairo-runtime/implementations.env
 # The release is resolved once, at start, so the process imports one immutable release.
 ExecStart=/bin/sh -c 'release=$$(readlink -f /var/lib/kairo/deploy/current) && exec env PYTHONPATH="$$release/src" /usr/bin/python3 -m kairo --run --db /var/lib/kairo/kairo.db --socket /var/lib/kairo/kairo.sock --repository /var/lib/kairo/dev --releases /var/lib/kairo/deploy --cognition claude --provider-opt claude.executable=@KAIRO_HOME@/.local/bin/claude'
 Restart=on-failure

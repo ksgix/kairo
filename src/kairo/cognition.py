@@ -278,6 +278,9 @@ def as_cognition(cognition: Any) -> Cognition | None:
 
 DECISION_FIELDS = {"reason", "actions", "replies", "sleep", "wake_after", "work"}
 ACTION_FIELDS = {"kind", "params", "reason", "work"}
+# Optional per action: "resumes", an earlier action whose external outcome is
+# unresolved (validated by the runtime; see Runtime._resume_key).
+OPTIONAL_ACTION_FIELDS = {"resumes"}
 WORK_FIELDS = {
     "create": {"op", "ref", "objective", "why", "directive_id", "strategy", "next_step"},
     "update": {"op", "work_id", "understanding", "strategy", "next_step"},
@@ -303,6 +306,9 @@ def decision_schema(available_actions: dict[str, dict[str, Any]]) -> dict[str, A
                 # The work this action is an attempt at: a work id, a ref created in
                 # this decision, or null.
                 "work": _OPT_STR,
+                # Optional: the id of an earlier action whose external outcome is
+                # unknown, continued under the same operation key.
+                "resumes": _OPT_STR,
             },
             "required": sorted(ACTION_FIELDS),
             "additionalProperties": False,
@@ -415,16 +421,21 @@ def parse_decision(data: Any, available_actions: dict[str, dict[str, Any]]) -> D
 
     parsed = []
     for i, a in enumerate(actions):
-        if not isinstance(a, dict) or a.keys() != ACTION_FIELDS:
-            raise invalid(f"action {i} must have exactly the fields {sorted(ACTION_FIELDS)}")
+        if not isinstance(a, dict) or not ACTION_FIELDS <= a.keys() \
+                or a.keys() - ACTION_FIELDS - OPTIONAL_ACTION_FIELDS:
+            raise invalid(f"action {i} must have the fields {sorted(ACTION_FIELDS)} "
+                          f"(optionally {sorted(OPTIONAL_ACTION_FIELDS)})")
         if a["kind"] not in available_actions:
             raise invalid(f"action {i} has unsupported kind {a['kind']!r}")
         if not isinstance(a["params"], dict) or not isinstance(a["reason"], str):
             raise invalid(f"action {i}: 'params' must be an object and 'reason' a string")
         if a["work"] is not None and not isinstance(a["work"], str):
             raise invalid(f"action {i}: 'work' must be a work id, a ref, or null")
+        if a.get("resumes") is not None and not isinstance(a["resumes"], str):
+            raise invalid(f"action {i}: 'resumes' must be an action id or null")
         # work_id holds the name cognition used; the runtime resolves and validates it.
-        parsed.append(Action(a["kind"], a["params"], reason=a["reason"], work_id=a["work"]))
+        parsed.append(Action(a["kind"], a["params"], reason=a["reason"], work_id=a["work"],
+                             resumes=a.get("resumes")))
 
     return Decision(
         actions=parsed,

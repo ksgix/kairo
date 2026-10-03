@@ -30,7 +30,7 @@ from kairo.cognition import Cognition, CognitionProvider, Context, as_cognition
 from kairo.directives import Directive, Directives
 from kairo.environment import Environment
 from kairo.memory import Memory, from_record
-from kairo.redact import redact
+from kairo.redact import head_tail, redact
 from kairo.situation import LIMITS, build_situation
 from kairo.todo import Todo
 from kairo.verification import Outcome, Verification, Verifier, verify
@@ -748,6 +748,14 @@ class Runtime:
                                    f"({earlier['state']}) made since this work's understanding "
                                    "last changed; update the understanding before repeating it")})
                     continue
+            if action.resumes is not None:  # continuing an unresolved external operation
+                try:
+                    action = dataclasses.replace(action,
+                                                 operation_key=self._resume_key(action, work_id))
+                except WorkError as exc:
+                    rejected.append({"op": "action_refused", "target": work_id,
+                                     "resumes": action.resumes, "reason": str(exc)})
+                    continue
             steps.append(self.act(dataclasses.replace(action, work_id=work_id)))
         if work.applied or rejected:
             summary["work"] = {"applied": work.applied, "rejected": rejected}
@@ -759,12 +767,47 @@ class Runtime:
                         if decision.sleep else None)
         return steps, decision.reason, summary, sleep_reason, decision.wake_after
 
+    def _resume_key(self, action: Action, work_id: str | None) -> str:
+        """The operation key an action resuming ``action.resumes`` inherits. Only the
+        latest attempt of an unresolved external operation (outcome unknown, or
+        interrupted) of the same tool and the same work can be resumed, and only on
+        a tool declaring idempotency by operation key. Raises WorkError otherwise."""
+        earlier = self.memory.get("action", action.resumes)
+        if not isinstance(earlier, dict) or not earlier.get("id"):
+            raise WorkError(f"resumes {action.resumes!r}: no such action")
+        if work_id is None or earlier.get("work_id") != work_id:
+            raise WorkError("a resume must be linked to the same work as the action it resumes")
+        if earlier.get("kind") != action.kind:
+            raise WorkError(f"resumes {earlier['id']}, a different kind ({earlier.get('kind')})")
+        profile = getattr(self.environment, "tool_profile", lambda kind: None)(action.kind) or {}
+        if profile.get("idempotency") != "operation_key":
+            raise WorkError(f"{action.kind} does not declare idempotency by operation key: an "
+                            "unresolved operation can be settled by verification, not resumed")
+        state = action_state(earlier)
+        if state not in ("outcome_unknown", "interrupted") or (
+                state == "interrupted" and earlier.get("effects") != "external"):
+            raise WorkError(f"resumes {earlier['id']}, whose external outcome is not unresolved "
+                            f"(it is {state})")
+        key = earlier.get("operation_key") or earlier["id"]
+        for later in self.work.attempts(work_id, ATTEMPT_SCAN):
+            if (later.get("id") != earlier["id"] and later.get("operation_key") == key
+                    and (later.get("started_at") or 0) > (earlier.get("started_at") or 0)):
+                raise WorkError(f"operation {key} was continued by {later.get('id')}; "
+                                "resume the latest attempt")
+        return key
+
     def act(self, action: Action) -> Step:
         # The action is logged as started before it runs, so a crash mid-action
         # is visible after restart instead of being silently forgotten or replayed.
         # Records are redacted and bounded: output may contain secrets or be huge.
+        # Its operation key (what an external system sees) is this attempt's own id,
+        # unless a validated resume carries an earlier one.
+        action = dataclasses.replace(action, operation_key=action.operation_key or action.id)
         record: dict[str, Any] = {**dataclasses.asdict(action), "status": "started",
                                   "started_at": time.time()}
+        profile = getattr(self.environment, "tool_profile", None)
+        if profile and (declared := profile(action.kind)) and declared.get("effects"):
+            record["effects"] = declared["effects"]  # what the tool says it may change
         if action.work_id is not None:  # which strategy of that work this attempt belongs to
             work = self.work.get(action.work_id)
             record["strategy_revision"] = work.strategy_revision if work else None
@@ -790,6 +833,11 @@ class Runtime:
         result_record = dataclasses.asdict(result)
         if ran := result_record.pop("implementation", None):  # what actually ran
             record["implementation"] = ran
+        output = result_record.get("output")
+        if isinstance(output, dict):  # keep the beginning and the end (results, errors)
+            for stream in ("stdout", "stderr"):
+                if isinstance(output.get(stream), str):  # redacted before cut: no split secret
+                    output[stream] = head_tail(redact(output[stream]), STORED_STRING_LIMIT)
         record.update(status="finished", finished_at=time.time(), result=result_record,
                       verification=dataclasses.asdict(verification))
         self.memory.put("action", action.id, redact(record, limit=STORED_STRING_LIMIT))
@@ -826,8 +874,10 @@ def _summarise_attempt(record: dict[str, Any]) -> dict[str, Any]:
     detail = None
     if state in FAILED:
         text = result.get("error") or output.get("stderr") or ""
-        detail = text[:300] if isinstance(text, str) else None
+        detail = head_tail(text, 300) if isinstance(text, str) else None  # the end shows the error
     return {"id": record.get("id"), "strategy_revision": record.get("strategy_revision"),
             "state": state, "failure": failure_of(record), "returncode": output.get("returncode"),
             "identity": attempt_identity(record.get("kind"), record.get("params")),
-            "at": record.get("finished_at") or record.get("started_at"), "detail": detail}
+            "at": record.get("finished_at") or record.get("started_at"), "detail": detail,
+            "kind": record.get("kind"), "operation_key": record.get("operation_key"),
+            "effects": record.get("effects"), "external_outcome": result.get("external_outcome")}

@@ -328,8 +328,9 @@ class WorkLedger(Collection[Work]):
         return evidence
 
     def unsettled_repeat(self, work_id: str, identity: str) -> dict[str, Any] | None:
-        """An earlier attempt at this work, identical to ``identity``, that failed or
-        was interrupted after cognition last changed its understanding. Repeating it
+        """An earlier attempt at this work, identical to ``identity``, that failed, was
+        interrupted or has an unknown external outcome, after cognition last changed
+        its understanding. Repeating it
         without reassessing is refused. No counting: a changed understanding clears it."""
         try:
             work = self.get(work_id)
@@ -340,7 +341,7 @@ class WorkLedger(Collection[Work]):
         since = work.understanding_at if isinstance(work.understanding_at, (int, float)) else None
         for record in reversed(self.attempts(work_id, ATTEMPT_SCAN)):
             state = action_state(record)
-            if state not in FAILED and state != "interrupted":
+            if state not in FAILED and state not in ("interrupted", "outcome_unknown"):
                 continue
             at = record.get("finished_at") or record.get("started_at")
             if since is not None and isinstance(at, (int, float)) and at <= since:

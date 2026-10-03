@@ -151,7 +151,10 @@ class HistoryTest(SituationCase):
             unchecked.action.id: "executed_unverified", broken.action.id: "failed_to_execute",
         })
         item = s["history"]["actions"]["items"][2]
-        self.assertEqual((item["stdout"], item["returncode"], item["purpose"]), ("hello\n", 0, "test"))
+        self.assertEqual((item["output"]["stdout"], item["returncode"], item["purpose"]),
+                         ("hello\n", 0, "test"))
+        self.assertEqual((item["output"]["trust"], item["output"]["source"]),
+                         ("untrusted", "process.run"))  # content, kept apart from the facts
         threads = s["open_threads"]
         self.assertEqual({a["id"]: a["failure"] for a in threads["actions_failed"]},
                          {wrong.action.id: "verification_failed", broken.action.id: "not_found"})
@@ -224,7 +227,7 @@ class HistoryTest(SituationCase):
         self.assertEqual(cycle["assessment"], "Checking disk before deciding.")
         [action] = second["history"]["actions"]["items"]
         self.assertEqual(cycle["requested_actions"], [action["id"]])
-        self.assertEqual((action["purpose"], action["stdout"]), ("check disk", "disk ok\n"))
+        self.assertEqual((action["purpose"], action["output"]["stdout"]), ("check disk", "disk ok\n"))
         self.assertEqual(second["now"]["wake_reason"], "first start")  # still the same awake period
 
 
@@ -291,7 +294,7 @@ class ReviewRegressionTest(SituationCase):
                        for i in range(15)]
         s = build_situation(Context(environment={}, directives=[], todo=[], messages=old_chat,
                                     recent_actions=new_actions, runtime={"now": 3000.0}),
-                            Limits(budget=40_000))
+                            Limits(budget=42_000))  # 10B's notes take ~1.5k of the fixed part
         self.assertGreater(s["context"]["trimmed_for_budget"], 0)
         kept = [a["id"] for a in s["history"]["actions"]["items"]]
         self.assertEqual(kept, [f"a{i}" for i in range(15)])  # newer than every message
@@ -450,8 +453,8 @@ class BoundsTest(SituationCase):
         rt.start()
         run_action(rt, [sys.executable, "-c", "print('z' * 20000)"])
         [a] = situation_of(rt)["history"]["actions"]["items"]
-        self.assertLess(len(a["stdout"]), LIMITS.action_output + 60)
-        self.assertIn("[truncated", a["stdout"])
+        self.assertLessEqual(len(a["output"]["stdout"]), LIMITS.action_output)
+        self.assertIn("[truncated", a["output"]["stdout"])
         self.assertLess(len(rt.memory.all("action")[0]["result"]["output"]["stdout"]), 16_100)
 
     def test_total_budget_trims_oldest_history_first(self):
@@ -464,7 +467,7 @@ class BoundsTest(SituationCase):
         self.assertGreater(s["context"]["trimmed_for_budget"], 0)
         self.assertLess(len(render_situation(s)), limits.budget + 2000)  # + the context section
         kept = s["history"]["actions"]["items"]
-        self.assertTrue(kept and kept[-1]["stdout"].startswith("7"))  # newest survives
+        self.assertTrue(kept and kept[-1]["output"]["stdout"].startswith("7"))  # newest survives
         self.assertEqual(s["history"]["actions"]["omitted_older"], 8 - len(kept))
 
 
