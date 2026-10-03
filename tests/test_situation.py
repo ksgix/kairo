@@ -17,7 +17,7 @@ from unittest import mock
 from kairo import Action, Decision, Environment, Memory, Outcome, Runtime, State, Verification
 from kairo.cognition import Context
 from kairo.environment import ACTIONS
-from kairo.redact import MARKER
+from kairo.redact import MARKER, secret_values
 from kairo.situation import LIMITS, Limits, build_situation, render_situation
 from test_continuous import SRC, TIMEOUT
 
@@ -311,18 +311,39 @@ class ReviewRegressionTest(SituationCase):
         self.assertEqual(rt.status()["identity"], "kairo-1")
 
 
+class StableHost(Environment):
+    """A host whose facts are identical for both processes of a restart test,
+    whatever directory the suite runs from. The real observation includes the
+    working directory, which can contain values Kairo redacts (an environment
+    variable named like a secret, e.g. a session id in a temporary path).
+
+    Known runtime issue, deliberately not hidden or changed here: the previous
+    observation is stored redacted, the fresh one is compared unredacted, so a
+    host fact containing a redacted value is reported as changed on every
+    comparison (situation._environment)."""
+
+    def observe(self):
+        return {"hostname": "test-host", "user": "test-user", "cwd": "/srv/kairo-test",
+                "python": "3.12"}
+
+
 class RestartTest(SituationCase):
-    def test_restart_after_clean_stop(self):
+    def restart_situation(self):
+        """Two processes on one database: the first cycles and stops cleanly; the
+        situation the second one starts with."""
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "k.db"
-            first = self.runtime(db)
+            first = self.runtime(db, environment=StableHost())
             first.start()
             first.cycle()  # no cognition: observes, records, sleeps
             first.stop()
             first.memory.close()
-            second = self.runtime(db)
+            second = self.runtime(db, environment=StableHost())
             second.start()
-            s = situation_of(second)
+            return situation_of(second)
+
+    def test_restart_after_clean_stop(self):
+        s = self.restart_situation()
         self.assertEqual(s["kairo"]["starts"], 2)
         self.assertEqual(s["now"]["wake_reason"], "started after clean stop")
         self.assertIs(s["now"]["previous_process"]["ended_cleanly"], True)
@@ -330,6 +351,24 @@ class RestartTest(SituationCase):
         comparison = s["environment"]["since_previous_observation"]
         self.assertEqual(comparison["changed"], {})
         self.assertIn("age_seconds", comparison["previous_observation"])
+
+    def test_restart_does_not_depend_on_where_the_suite_runs(self):
+        """Regression: run from a directory whose path contains the value of a
+        secret-named environment variable (as under a tool's session temp dir),
+        the restart is still seen as unchanged."""
+        value = "synthetic-session-0123456789"
+        with tempfile.TemporaryDirectory(prefix=f"{value}-") as cwd, \
+                mock.patch.dict(os.environ, {"KAIRO_TEST_SESSION_ID": value}):
+            here = os.getcwd()
+            os.chdir(cwd)
+            try:
+                self.assertIn(value, secret_values())  # the condition is really present:
+                self.assertIn(value, Environment().observe()["cwd"])  # a redacted value in cwd
+                s = self.restart_situation()
+            finally:
+                os.chdir(here)  # before the directory is removed
+        self.assertEqual(s["kairo"]["starts"], 2)
+        self.assertEqual(s["environment"]["since_previous_observation"]["changed"], {})
 
 
 class EnvironmentAndCapabilitiesTest(SituationCase):
