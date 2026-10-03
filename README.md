@@ -465,3 +465,7 @@ The tests need no network, credentials or third-party packages.
 - Release and snapshot retention
 - Dashboard, web UI, REST API
 - Memory beyond plain documents (no embeddings, ranking or consolidation)
+
+## License
+
+MIT. See [LICENSE](LICENSE).
