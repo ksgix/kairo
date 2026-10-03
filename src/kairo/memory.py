@@ -101,6 +101,27 @@ class Memory:
             ).fetchall()
         return [json.loads(r[0]) for r in reversed(rows)]
 
+    def page(self, kind: str, limit: int, after: int | None = None
+             ) -> tuple[list[tuple[int, dict[str, Any]]], bool, bool]:
+        """One page of a kind in first-insertion order, each record with its
+        ``seq``: those after ``after`` (oldest first), or without it the last
+        ``limit``. Also returns whether records exist before and after the page."""
+        with self._lock:
+            if after is None:
+                rows = self._db.execute(
+                    "SELECT seq, data FROM records WHERE kind = ? ORDER BY seq DESC LIMIT ?",
+                    (kind, limit)).fetchall()[::-1]
+            else:
+                rows = self._db.execute(
+                    "SELECT seq, data FROM records WHERE kind = ? AND seq > ? ORDER BY seq LIMIT ?",
+                    (kind, after, limit)).fetchall()
+            low = rows[0][0] if rows else (after if after is not None else 0) + 1
+            high = rows[-1][0] if rows else (after if after is not None else 0)
+            before, beyond = (bool(self._db.execute(
+                f"SELECT 1 FROM records WHERE kind = ? AND seq {op} ? LIMIT 1",
+                (kind, bound)).fetchone()) for op, bound in (("<", low), (">", high)))
+        return [(seq, json.loads(data)) for seq, data in rows], before, beyond
+
     def count(self, kind: str) -> int:
         with self._lock:
             return self._db.execute(

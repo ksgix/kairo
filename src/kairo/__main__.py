@@ -3,8 +3,11 @@
 ``python -m kairo [--db PATH]``
     Start, run one cycle, print the resulting state, stop.
 
-``python -m kairo --situation [--db PATH]``
-    Print the situation cognition would be shown now (bounded and redacted),
+``python -m kairo --situation [--db PATH] [--socket PATH]``
+    Print the situation cognition would be shown now (bounded and redacted).
+    If a runtime is running on the database, the situation comes from that
+    runtime over IPC (its own release, lifecycle and records); otherwise it is a
+    preview built here, which claims no running release,
     without starting the runtime or calling any provider.
 
 ``python -m kairo --run [--db PATH] [--socket PATH] [--reassess SECONDS] [--cognition ORDER]``
@@ -128,25 +131,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.repository is not None and not args.preflight:
         try:
             deployment = Deployment(args.repository, args.releases, args.db,
-                                    preflight_args=_preflight_args(args, implementations_dir))
+                                    preflight_args=_preflight_args(args, implementations_dir),
+                                    # a preview is not a runtime: it runs no release
+                                    running=os.devnull if args.situation else None)
         except ValueError as exc:
             parser.error(str(exc))
     environment = Environment(Implementations(implementations_dir, enabled), deployment)
 
-    if not args.situation:  # one database, one runtime
-        try:
-            lock_database(args.db)  # held until this process ends
-        except DatabaseLocked as exc:
-            print(f"kairo: {exc}", file=sys.stderr)
-            return 2
+    try:  # one database, one runtime
+        lock = lock_database(args.db)  # held until this process ends
+    except DatabaseLocked as exc:
+        if args.situation:  # a live runtime owns the database: show its own situation
+            return _live_situation(args.socket, args.db)
+        print(f"kairo: {exc}", file=sys.stderr)
+        return 2
     memory = Memory(args.db)
     try:
         if args.preflight:
             return _preflight(memory, environment)
-        if args.situation:
+        if args.situation:  # no runtime is running: a preview, then release the lock
             runtime = Runtime(memory, environment, cognition=cognition,
                               reassess_after=args.reassess or None)
             print(render_situation(build_situation(runtime.context())))
+            os.close(lock)
             return 0
         if args.run:
             return _run(memory, args.socket, args.reassess or None, cognition, environment)
@@ -184,6 +191,23 @@ def _once(memory: Memory, db: Path, cognition: Cognition | None,
     print(json.dumps({"memory": str(db), **runtime.status()}, indent=2))
     runtime.stop()
     return runtime.exit_code
+
+
+def _live_situation(socket_path: Path, db: Path) -> int:
+    """The situation of the runtime that owns ``db``, computed by that runtime,
+    so it describes the release and state actually running."""
+    from kairo.ipc import IPCError, request
+    try:
+        response = request(socket_path, {"op": "situation"}, timeout=60)
+    except (OSError, IPCError, ValueError) as exc:
+        print(f"kairo: a running Kairo owns {db}; its situation is read from it over IPC, but "
+              f"{socket_path} is not reachable ({exc}); pass --socket", file=sys.stderr)
+        return 2
+    if not response.get("ok"):
+        print(f"kairo: the running Kairo refused: {response.get('error')}", file=sys.stderr)
+        return 1
+    print(render_situation(response["result"]))
+    return 0
 
 
 def _preflight(memory: Memory, environment: Environment) -> int:

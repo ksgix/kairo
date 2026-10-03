@@ -13,6 +13,7 @@ an explicit wake request, its own reassessment deadline) or it is stopped.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import threading
 import time
@@ -26,11 +27,11 @@ from kairo import deploy
 from kairo.actions import FAILED, Action, ActionResult, action_state, attempt_identity, failure_of
 from kairo.chat import Chat, Message, Sender
 from kairo.cognition import Cognition, CognitionProvider, Context, as_cognition
-from kairo.directives import Directives
+from kairo.directives import Directive, Directives
 from kairo.environment import Environment
-from kairo.memory import Memory
+from kairo.memory import Memory, from_record
 from kairo.redact import redact
-from kairo.situation import LIMITS
+from kairo.situation import LIMITS, build_situation
 from kairo.todo import Todo
 from kairo.verification import Outcome, Verification, Verifier, verify
 from kairo.work import ATTEMPT_SCAN, CLOSED, OPEN, WorkError, WorkLedger, WorkState
@@ -55,6 +56,18 @@ class State(StrEnum):
 
 class LifecycleError(RuntimeError):
     pass
+
+
+class OperatorRejected(ValueError):
+    """An operator request that is well-formed but not applicable to the current
+    state (unknown directive, duplicate statement, reused message id). Says why."""
+
+
+OPERATOR = "operator"  # origin of everything that arrives over the operator channel
+DIRECTIVE_TEXT = 500   # characters in a directive statement
+CHAT_PAGE = 200        # messages in one chat read
+CHAT_TEXT = 8000       # characters of one message in a chat read (the record keeps all)
+DIRECTIVE_PAGE = 200   # directives in one read
 
 
 @dataclass(frozen=True)
@@ -266,10 +279,13 @@ class Runtime:
     def _stop_extra(self) -> dict[str, Any]:
         return {"restart_for": self._restart_for} if self._restart_for else {}
 
-    def request_stop(self) -> None:
+    def request_stop(self, reason: str | None = None) -> None:
         """Ask a running loop to stop. Only sets a flag, so it is safe to call
-        from any thread or a signal handler."""
+        from any thread or a signal handler. ``reason`` (an operator stop) is
+        recorded as the stop reason unless a deployment restart already set one."""
         with self._cond:
+            if reason and self.exit_code == 0:
+                self._stop_reason = reason
             self._stop_requested = True
             self._cond.notify_all()
 
@@ -357,6 +373,7 @@ class Runtime:
             **snapshot,
             "directives": len(self.directives.active()),
             "open_todo": len(self.todo.open()),
+            "open_work": len(self.work.open()),
             # Configured implementations, derived from the filesystem (no guidance).
             "implementations": [
                 {"id": i["id"], "state": i["state"], "reason": i["reason"],
@@ -366,7 +383,10 @@ class Runtime:
             "cognition": ",".join(cognition.names) if cognition else None,
             # Which provider made the last cycle's decision, and why it was asked.
             "cognition_last": {"provider": last.get("provider"),
-                               "selection": last.get("selection")} if last else None,
+                               "selection": last.get("selection"),
+                               "result": last.get("result"), "failure": last.get("failure"),
+                               "at": (self.memory.get("runtime", "last_cycle") or {}).get("at")}
+            if last else None,
         }
 
     # -- continuous operation ---------------------------------------------
@@ -412,11 +432,104 @@ class Runtime:
 
     # -- interaction -------------------------------------------------------
 
+    # The operator boundary (reached over IPC). Inputs become persisted records
+    # that cognition sees; reads are projections computed here, by the live
+    # runtime. Nothing here executes an action, changes work or deployment, or
+    # decides anything: what follows an input is a cognition decision.
+
     def receive(self, text: str) -> Message:
         """A human message arrives. A sleeping runtime wakes to reassess."""
-        message = self.chat.post(Sender.HUMAN, text)
+        return self.accept_message(text)[0]
+
+    def accept_message(self, text: str, client_id: str | None = None) -> tuple[Message, bool]:
+        """The operator channel: the only writer of human messages. The message is
+        persisted, then Kairo wakes (or, mid-cycle, reassesses once more).
+
+        With ``client_id`` delivery is idempotent: the record id is derived from it,
+        so the same id again returns the stored message (duplicate=True) without
+        posting or waking again, across restarts; the same id with a different
+        text is refused. The message record itself is the idempotency state."""
+        with self._cond:
+            if client_id is None:
+                message = self.chat.post(Sender.HUMAN, text)
+            else:
+                record_id = operator_message_id(client_id)
+                existing = self.chat.get(record_id)
+                if existing is not None:
+                    if existing.sender != Sender.HUMAN or existing.text != text:
+                        raise OperatorRejected(f"message id {client_id!r} was already used for a "
+                                               "different message")
+                    return existing, True
+                message = self.chat.post(Sender.HUMAN, text, id=record_id)
         self.request_wake("message received")
-        return message
+        return message, False
+
+    def conversation(self, limit: int = 50, after: int | None = None) -> dict[str, Any]:
+        """The chat as persisted (human messages and Kairo's replies), in order:
+        the last ``limit`` messages, or those after sequence number ``after``.
+        Text is redacted and capped per message; the records keep everything."""
+        rows, before, beyond = self.memory.page("message", min(limit, CHAT_PAGE), after)
+        messages = []
+        for seq, data in rows:
+            try:
+                m = from_record(Message, data)
+            except (TypeError, ValueError):
+                messages.append({"seq": seq, "unreadable": True})
+                continue
+            text = redact(m.text)
+            item = {"seq": seq, "id": m.id, "from": str(m.sender), "at": m.at,
+                    "text": text[:CHAT_TEXT]}
+            if len(text) > CHAT_TEXT:
+                item["truncated_from"] = len(text)
+            messages.append(item)
+        return {"messages": messages, "more_before": before, "more_after": beyond}
+
+    def situation(self) -> dict[str, Any]:
+        """What cognition would be shown now, computed by this live runtime, so
+        its runtime facts (the running release, lifecycle, records) are this
+        process's own."""
+        return build_situation(self.context())
+
+    def directive_list(self) -> dict[str, Any]:
+        records = self.directives.all()
+        shown = records[-DIRECTIVE_PAGE:]
+        return {"directives": [_directive_view(d) for d in shown],
+                "omitted_older": len(records) - len(shown)}
+
+    def add_directive(self, statement: str) -> Directive:
+        """The operator sets a lasting area of responsibility. Nothing is executed;
+        cognition sees it from the next cycle on, and Kairo wakes to reassess."""
+        statement = statement.strip()
+        if not statement or len(statement) > DIRECTIVE_TEXT:
+            raise OperatorRejected(f"a directive statement must be 1-{DIRECTIVE_TEXT} characters")
+        with self._cond:
+            wanted = " ".join(statement.lower().split())
+            for d in self.directives.active():
+                if " ".join(d.statement.lower().split()) == wanted:
+                    raise OperatorRejected(f"active directive {d.id} already says this")
+            directive = self.directives.add(statement, origin=OPERATOR)
+        log.info("directive %s added by the operator", directive.id)
+        self.request_wake("directive added by the operator")
+        return directive
+
+    def set_directive_active(self, directive_id: str, active: bool) -> Directive:
+        """Deactivate a directive, or activate one again. Directives are never
+        edited or deleted: work linked to one keeps meaning what it meant."""
+        with self._cond:
+            try:
+                current = self.directives.get(directive_id)
+            except (TypeError, ValueError):
+                raise OperatorRejected(f"directive {directive_id!r} is unreadable") from None
+            if current is None:
+                raise OperatorRejected(f"no directive {directive_id!r}")
+            if current.active == active:
+                raise OperatorRejected(f"directive {directive_id} is already "
+                                       f"{'active' if active else 'inactive'}")
+            directive = self.directives.set_active(directive_id, active, by=OPERATOR)
+        verb = "activated" if active else "deactivated"
+        log.info("directive %s %s by the operator", directive_id, verb)
+        self.request_wake(f"directive {verb} by the operator")
+        return directive
 
     # -- cycle -------------------------------------------------------------
 
@@ -684,6 +797,17 @@ class Runtime:
         if result.restart and action.kind == deploy.KIND:
             self._request_restart(action.id)
         return Step(action, result, verification)
+
+
+def operator_message_id(client_id: str) -> str:
+    """The record id of an operator message delivered with a client id."""
+    return hashlib.sha256(b"kairo-operator-message\0" + client_id.encode()).hexdigest()[:32]
+
+
+def _directive_view(d: Directive) -> dict[str, Any]:
+    """A directive as the operator is shown it: redacted, like everything read out."""
+    return redact({"id": d.id, "statement": d.statement, "active": d.active,
+                   "created_at": d.created_at, "origin": d.origin, "history": d.history})
 
 
 def _attempt_summary(record: Any) -> dict[str, Any] | None:

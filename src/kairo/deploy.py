@@ -156,7 +156,9 @@ class Deployment:
                        "digest": content_digest(self.running)}
         return {
             "running": running or {"revision": None,
-                                   "note": "not running from a release under " + str(self.root)},
+                                   "note": "this process runs no release under "
+                                           + str(self.root) + " (a preview, or code started "
+                                           "outside the release layout)"},
             "current": {"revision": self._link("current")},
             "previous": {"revision": self._link("previous")},
             "repository": self._repository_facts(),

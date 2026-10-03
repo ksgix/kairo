@@ -377,9 +377,13 @@ class LockTest(unittest.TestCase):
         self.assertEqual(rerun.returncode, 2)
         self.assertEqual(memory.get("action", "live")["status"], "started")  # not "interrupted"
         self.assertEqual(self.once(self.dir / "independent.db").returncode, 0)  # per database
-        situation = subprocess.run(kairo_cmd("--situation", "--db", str(self.db)),
+        # A read-only view is not a runtime: with a runtime live, it is that runtime's
+        # own situation, fetched over IPC (Phase 10A), not a second view built here.
+        situation = subprocess.run(kairo_cmd("--situation", "--db", str(self.db), "--socket",
+                                             str(self.dir / "k.sock")),
                                    env=_env(PACKAGE.parent), capture_output=True, timeout=30)
-        self.assertEqual(situation.returncode, 0)  # a read-only view is not a runtime
+        self.assertEqual(situation.returncode, 0, situation.stderr)
+        self.assertEqual(json.loads(situation.stdout)["now"]["lifecycle_state"], "sleeping")
         live.send_signal(signal.SIGTERM)
         self.assertEqual(live.wait(15), 0)
         self.assertEqual(self.once(self.db).returncode, 0)  # released on exit

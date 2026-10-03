@@ -33,5 +33,5 @@ class Chat(Collection[Message]):
     def __init__(self, memory: Memory) -> None:
         super().__init__(memory, "message", Message)
 
-    def post(self, sender: Sender, text: str) -> Message:
-        return self.save(Message(sender, text))
+    def post(self, sender: Sender, text: str, id: str | None = None) -> Message:
+        return self.save(Message(sender, text, id=id) if id else Message(sender, text))
