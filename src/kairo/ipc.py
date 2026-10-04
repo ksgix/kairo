@@ -315,9 +315,11 @@ def request(path: str | Path, payload: dict[str, Any],
         sock.connect(str(path))
         sock.sendall(json.dumps(payload).encode() + b"\n")
         with sock.makefile("rb") as f:
-            line = f.readline()
+            line = f.readline(MAX_RESPONSE + 2)  # the server never sends more than MAX_RESPONSE
     if not line:
         raise IPCError("connection closed without a response")
+    if not line.endswith(b"\n"):
+        raise IPCError(f"response larger than {MAX_RESPONSE} bytes or incomplete")
     return json.loads(line)
 
 

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="kairo-csrf" content="{{CSRF}}">
+<title>Kairo</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <span class="brand">Kairo</span>
+  <span id="conn" class="badge">connecting…</span>
+  <span id="state" class="badge">state unknown</span>
+  <span id="rev" class="muted"></span>
+  <span class="spacer"></span>
+  <span id="updated" class="muted"></span>
+  <button id="refresh" type="button">Refresh</button>
+  <form method="post" action="/logout"><button type="submit">Log out</button></form>
+</header>
+<nav id="nav">
+  <button type="button" data-page="overview">Overview</button>
+  <button type="button" data-page="chat">Chat</button>
+  <button type="button" data-page="directives">Directives</button>
+  <button type="button" data-page="work">Work</button>
+  <button type="button" data-page="todo">Todo</button>
+  <button type="button" data-page="activity">Activity</button>
+  <button type="button" data-page="context">Context</button>
+  <button type="button" data-page="system">System</button>
+</nav>
+<div id="notice" class="notice" hidden></div>
+<main id="main"></main>
+<footer>
+  <span class="prov fact">runtime fact</span> recorded or derived by the runtime ·
+  <span class="prov interp">cognition</span> cognition's own words, not verified ·
+  <span class="prov untrusted">untrusted content</span> printed by a program or external system ·
+  <span class="prov operator">operator</span> human input
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

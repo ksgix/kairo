@@ -131,6 +131,39 @@ class RunForeverTest(LoopCase):
         self.assertEqual(cognition.contexts[1].messages[-1].text, "arrived while thinking")
         self.stop(runtime, thread)
 
+    def test_wakes_between_the_loops_check_and_its_sleep(self):
+        # Regression: the loop saw 'sleeping', then two operator inputs arrived before
+        # it took the lock: the first woke Kairo, the second left a pending wake. The
+        # loop then tried to wake an awake runtime and its thread died. The
+        # interleaving is forced: another thread wakes Kairo twice at exactly that point.
+        class LateLoop(Runtime):
+            injected = False
+
+            def _sleep_until_woken(self):
+                if not self.injected:
+                    self.injected = True
+                    other = threading.Thread(target=lambda: (
+                        self.request_wake("message received"),
+                        self.request_wake("directive added by the operator")))
+                    other.start()
+                    other.join(TIMEOUT)
+                super()._sleep_until_woken()
+
+        cognition = Cognition(always_sleep)
+        memory = Memory(self.db)
+        self.addCleanup(memory.close)
+        runtime = LateLoop(memory, cognition=cognition)
+        thread = self.launch(runtime)
+        cognition.wait_calls(2)
+        self.assertTrue(runtime.wait_for(State.SLEEPING, TIMEOUT))
+        self.assertTrue(thread.is_alive())
+        # One cycle covers both wakes, as for any wake requested before a cycle starts,
+        # and nothing is left pending to cause another.
+        self.assertIsNone(runtime._wake_pending)
+        self.assertEqual([c.wake_reason for c in cognition.contexts],
+                         ["first start", "message received"])
+        self.stop(runtime, thread)
+
     def test_self_wake_for_reassessment(self):
         cognition = Cognition(lambda c, n: Decision(sleep=True, wake_after=0.01))
         runtime = self.open(cognition=cognition)

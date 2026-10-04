@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kairo — log in</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login">
+<main>
+  <h1>Kairo</h1>
+  <p>This dashboard is the operator's interface to a running Kairo. Enter the login token
+     from the dashboard's token file (written fresh each time the dashboard starts, readable
+     only by the account that runs it).</p>
+  <form method="post" action="/login">
+    <label for="token">Login token</label>
+    <input id="token" name="token" type="password" autocomplete="off" required autofocus>
+    <button type="submit">Log in</button>
+  </form>
+  <p class="error">{{FAILED}}</p>
+</main>
+</body>
+</html>

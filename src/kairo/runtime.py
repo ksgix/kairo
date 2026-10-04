@@ -417,6 +417,10 @@ class Runtime:
 
     def _sleep_until_woken(self) -> None:
         with self._cond:
+            if self.state is not State.SLEEPING:
+                # Woken between the loop's check and here (e.g. by the operator): the
+                # next cycle covers that wake and any wake requested after it.
+                return
             if self._wake_pending is not None:
                 self.wake(self._wake_pending)
                 return

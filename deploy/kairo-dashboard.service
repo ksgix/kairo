@@ -1,0 +1,42 @@
+# The Kairo dashboard under systemd: a browser interface to the running Kairo.
+#
+# A template like kairo.service: @KAIRO_USER@ is filled in at install time
+# (README, "Dashboard"). The dashboard must run as the account Kairo runs as:
+# Kairo's socket is that account's only (mode 0600), and the socket is the
+# dashboard's only way to Kairo.
+#
+# It is independent of kairo.service on purpose: it does not start, stop or
+# restart Kairo, and Kairo does not depend on it. While Kairo is stopped or
+# restarting, the dashboard reports it as unreachable. It runs the release that
+# was current when it started; after a deployment, restart it to serve the new
+# release's dashboard (it holds no state other than login sessions).
+#
+# It listens on 127.0.0.1 only. Reach it through an SSH tunnel, e.g.
+#   ssh -L 8765:127.0.0.1:8765 host    then open http://localhost:8765/
+# The login token is written fresh at each start to /var/lib/kairo/dashboard.token
+# (mode 0600, readable by @KAIRO_USER@ only; never logged).
+
+[Unit]
+Description=Kairo dashboard (browser interface to the Kairo operator socket)
+After=kairo.service
+
+[Service]
+Type=simple
+User=@KAIRO_USER@
+Group=@KAIRO_USER@
+WorkingDirectory=/var/lib/kairo
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/sh -c 'release=$$(readlink -f /var/lib/kairo/deploy/current) && exec env PYTHONPATH="$$release/src" /usr/bin/python3 -m kairo.dashboard --socket /var/lib/kairo/kairo.sock --host 127.0.0.1 --port 8765 --token-file /var/lib/kairo/dashboard.token'
+Restart=on-failure
+RestartSec=5
+# The dashboard needs nothing but its socket, its token file and a loopback port.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kairo
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
