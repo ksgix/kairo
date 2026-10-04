@@ -580,13 +580,111 @@ class AccessTest(DashboardCase):
 
     def test_security_headers_on_every_response(self):
         self.ready()
-        for r in [self.get("/"), self.get("/login"), self.get("/static/app.js"),
-                  self.get("/api/status"), self.get("/api/nothing")]:
+        session = self.cookie
+        responses = [self.get("/"), self.get("/login"), self.get("/static/app.js"),
+                     self.get("/api/status"), self.get("/api/nothing"),
+                     self.post("/api/wake", headers={"Origin": "null"})]       # 403
+        self.cookie = None
+        responses += [self.get("/"), self.get("/api/status"),                   # 303, 401
+                      self.http("POST", "/login", b"token=x", {"Origin": "null"})]
+        self.cookie = session
+        for r in responses:
             self.assertIn("script-src 'self'", r.headers["Content-Security-Policy"])
             self.assertIn("frame-ancestors 'none'", r.headers["Content-Security-Policy"])
             self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(r.headers["X-Frame-Options"], "DENY")
             self.assertEqual(r.headers["Cache-Control"], "no-store")
+            self.assertEqual(r.headers["Referrer-Policy"], "same-origin")  # see BrowserOriginTest
+
+
+def browser_origin(referrer_policy, page_origin):
+    """The Origin header a browser sends on a same-origin request that is not CORS
+    (a form POST, or a same-origin fetch() POST) from a page served with this
+    Referrer-Policy, for an http:// page posting to itself (Fetch standard,
+    "serializing a request origin"). no-referrer turns it into "null" even for the
+    page's own origin. Unmodelled policies fail rather than guess."""
+    if referrer_policy == "no-referrer":
+        return "null"
+    if referrer_policy in (None, "same-origin", "origin", "strict-origin", "unsafe-url",
+                           "origin-when-cross-origin", "strict-origin-when-cross-origin",
+                           "no-referrer-when-downgrade"):
+        return page_origin  # same origin, and no https -> http downgrade
+    raise AssertionError(f"Referrer-Policy {referrer_policy!r} is not modelled")
+
+
+class BrowserOriginTest(DashboardCase):
+    """Regression (found in production through an SSH tunnel): with Referrer-Policy
+    no-referrer, browsers sent "Origin: null" on the dashboard's own POSTs, which
+    the Origin check correctly refused, so no login, logout or action worked from a
+    browser. Each POST a page makes is sent here with the Origin a browser derives
+    from the policy the dashboard actually served for that page, at the tunnel's
+    host name. Origin: null itself stays refused."""
+
+    def setUp(self):
+        super().setUp()
+        self.launch()
+        self.serve()
+        self.tunnel = f"localhost:{self.port}"
+
+    def origin_for(self, page):
+        r = self.get(page, host=self.tunnel)
+        return browser_origin(r.headers.get("Referrer-Policy"), f"http://{self.tunnel}")
+
+    def test_the_login_form_reaches_token_validation(self):
+        origin = self.origin_for("/login")
+        self.assertEqual(origin, f"http://{self.tunnel}")
+        form = {"Content-Type": "application/x-www-form-urlencoded", "Origin": origin}
+        with mock.patch.object(dashboard.time, "sleep"), \
+                self.assertLogs("kairo.dashboard", "WARNING") as logs:
+            r = self.http("POST", "/login", b"token=wrong", form, cookie=False, host=self.tunnel)
+        self.assertEqual((r.status, r.headers["Location"]), (303, "/login?failed"))
+        self.assertIn("failed dashboard login", "\n".join(logs.output))  # the token was checked
+        r = self.http("POST", "/login", urlencode({"token": self.token}).encode(), form,
+                      cookie=False, host=self.tunnel)
+        self.assertEqual((r.status, r.headers["Location"]), (303, "/"))
+        self.assertIn(f"{SESSION_COOKIE}=", r.headers["Set-Cookie"])
+
+    def test_the_dashboards_actions_and_logout_pass_the_origin_check(self):
+        self.login()
+        origin = self.origin_for("/")  # the page whose logout form and app.js post
+        self.assertEqual(origin, f"http://{self.tunnel}")
+        browser = {"Origin": origin}
+
+        def ok(path, fields):
+            r = self.post(path, fields, headers=browser, host=self.tunnel)
+            self.assertEqual(r.status, 200, r.body)
+            return r.json()["result"]
+
+        directive = ok("/api/directives", {"statement": "Keep the browser path working"})
+        ok("/api/directives/deactivate", {"id": directive["directive"]["id"]})
+        ok("/api/directives/activate", {"id": directive["directive"]["id"]})
+        ok("/api/message", {"text": "sent the way a browser sends it", "id": "browser-1"})
+        ok("/api/wake", {"reason": "browser origin test"})
+        r = self.http("POST", "/logout", b"", browser, host=self.tunnel)
+        self.assertEqual((r.status, r.headers["Location"]), (303, "/login"))
+        self.fails(self.get("/api/status", host=self.tunnel), 401, "unauthorized")
+        r = self.post("/api/stop", headers=browser, host=self.tunnel)  # stop: after logout
+        self.fails(r, 401, "unauthorized")
+
+    def test_origin_null_is_still_refused(self):
+        runtime = self.runtime
+        form = {"Content-Type": "application/x-www-form-urlencoded", "Origin": "null"}
+        r = self.http("POST", "/login", urlencode({"token": self.token}).encode(), form,
+                      cookie=False, host=self.tunnel)
+        self.fails(r, 403, "forbidden")  # even with the right token: Origin is checked first
+        self.assertIsNone(r.headers.get("Set-Cookie"))
+        self.login()
+        for path, fields in [("/api/message", {"text": "x"}), ("/api/directives", {"statement": "x"}),
+                             ("/api/directives/activate", {"id": "x"}),
+                             ("/api/directives/deactivate", {"id": "x"}),
+                             ("/api/wake", {}), ("/api/stop", {})]:
+            self.fails(self.post(path, fields, headers={"Origin": "null"}, host=self.tunnel),
+                       403, "forbidden")
+        self.fails(self.http("POST", "/logout", b"", {"Origin": "null"}, host=self.tunnel),
+                   403, "forbidden")
+        self.ok("GET", "/api/status")  # the session survived the refused logout
+        self.assertEqual((runtime.memory.all("message"), runtime.memory.all("directive")), ([], []))
+        self.assertTrue(self.thread.is_alive())  # the refused stop did nothing
 
 
 # -- 16-18: what reaches the browser ---------------------------------------------------

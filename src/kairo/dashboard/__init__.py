@@ -87,7 +87,10 @@ SECURITY_HEADERS = {
                                 "base-uri 'none'; frame-ancestors 'none'"),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
+    # Not no-referrer: under it a browser sends "Origin: null" even on the page's own
+    # POSTs (login, logout, every action), which the Origin check must refuse.
+    # same-origin keeps the real Origin on our own requests, none for other sites.
+    "Referrer-Policy": "same-origin",
     "Cache-Control": "no-store",
 }
 
