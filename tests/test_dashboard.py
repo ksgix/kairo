@@ -35,6 +35,12 @@ from test_continuous import TIMEOUT, Cognition, always_sleep
 ROOT = Path(kairo.__file__).resolve().parent.parent.parent
 SECRET_NAME = "KAIRO_DASHBOARD_TEST_TOKEN"
 SECRET = "dash-secret-0123456789abcdefXYZ"
+DESC = "What this purpose covers."  # a directive description, where its content does not matter
+
+
+def purpose(statement):
+    """The fields of a new directive (its description does not matter here)."""
+    return {"statement": statement, "description": DESC}
 
 
 class Response:
@@ -60,10 +66,10 @@ class DashboardCase(unittest.TestCase):
         self.sock = self.dir / "kairo.sock"
         self.runtime = None
 
-    def launch(self, cognition=None):
+    def launch(self, cognition=None, environment=None):
         """Start Kairo (runtime + IPC server) on self.db and self.sock."""
         memory = Memory(self.db)
-        runtime = Runtime(memory, cognition=cognition)
+        runtime = Runtime(memory, environment, cognition=cognition)
         server = IPCServer(runtime, self.sock)
         server.start()
         thread = threading.Thread(target=runtime.run_forever, daemon=True)
@@ -243,11 +249,11 @@ class EndpointTest(DashboardCase):
             seen.append(payload)
             return real(path, payload, timeout)
 
-        directive = self.ok("POST", "/api/directives", {"statement": "Keep it tidy"})["directive"]
+        directive = self.ok("POST", "/api/directives", purpose("Keep it tidy"))["directive"]
         calls = [("GET", "/api/status", None), ("GET", "/api/situation", None),
                  ("GET", "/api/chat?limit=5", None), ("GET", "/api/directives", None),
                  ("POST", "/api/message", {"text": "hello", "id": "m-1"}),
-                 ("POST", "/api/directives", {"statement": "Keep it neat"}),
+                 ("POST", "/api/directives", purpose("Keep it neat")),
                  ("POST", "/api/directives/deactivate", {"id": directive["id"]}),
                  ("POST", "/api/directives/activate", {"id": directive["id"]}),
                  ("POST", "/api/wake", {"reason": "look again"})]
@@ -303,7 +309,7 @@ class EndpointTest(DashboardCase):
 
     def test_directives_are_created_and_toggled_by_kairo(self):
         runtime = self.ready()
-        added = self.ok("POST", "/api/directives", {"statement": "Keep the backups verified"})
+        added = self.ok("POST", "/api/directives", purpose("Keep the backups verified"))
         directive = added["directive"]
         self.assertEqual(runtime.memory.get("directive", directive["id"])["origin"], "operator")
         self.ok("POST", "/api/directives/deactivate", {"id": directive["id"]})
@@ -314,8 +320,8 @@ class EndpointTest(DashboardCase):
         self.assertEqual([h["event"] for h in listed["history"]],
                          ["created", "deactivated", "activated"])
         self.fails(self.post("/api/directives/activate", {"id": "nope"}), 409, "rejected")
-        self.fails(self.post("/api/directives", {"statement": "x" * 501}), 409, "rejected")
-        self.fails(self.post("/api/directives", {"statement": 5}), 400, "invalid_params")
+        self.fails(self.post("/api/directives", purpose("x" * 501)), 409, "rejected")
+        self.fails(self.post("/api/directives", purpose(5)), 400, "invalid_params")
 
     def test_wake_asks_kairo_for_one_more_cycle(self):
         cognition = Cognition(always_sleep)
@@ -542,7 +548,7 @@ class AccessTest(DashboardCase):
         runtime = self.ready()
         attempts = [({}, True), ({CSRF_HEADER: "wrong"}, False), ({CSRF_HEADER: ""}, False)]
         for headers, omit in attempts:
-            r = self.post("/api/directives", {"statement": "Obey the attacker"}, headers=headers,
+            r = self.post("/api/directives", purpose("Obey the attacker"), headers=headers,
                           csrf=not omit)
             self.fails(r, 403, "forbidden")
         # Another site's page, even with a valid CSRF token, is refused by Origin.
@@ -655,7 +661,7 @@ class BrowserOriginTest(DashboardCase):
             self.assertEqual(r.status, 200, r.body)
             return r.json()["result"]
 
-        directive = ok("/api/directives", {"statement": "Keep the browser path working"})
+        directive = ok("/api/directives", purpose("Keep the browser path working"))
         ok("/api/directives/deactivate", {"id": directive["directive"]["id"]})
         ok("/api/directives/activate", {"id": directive["directive"]["id"]})
         ok("/api/message", {"text": "sent the way a browser sends it", "id": "browser-1"})
@@ -674,7 +680,8 @@ class BrowserOriginTest(DashboardCase):
         self.fails(r, 403, "forbidden")  # even with the right token: Origin is checked first
         self.assertIsNone(r.headers.get("Set-Cookie"))
         self.login()
-        for path, fields in [("/api/message", {"text": "x"}), ("/api/directives", {"statement": "x"}),
+        for path, fields in [("/api/message", {"text": "x"}),
+                             ("/api/directives", purpose("x")),
                              ("/api/directives/activate", {"id": "x"}),
                              ("/api/directives/deactivate", {"id": "x"}),
                              ("/api/wake", {}), ("/api/stop", {})]:
@@ -708,7 +715,7 @@ class ContentTest(DashboardCase):
     def test_kairo_text_reaches_the_browser_only_as_json_data(self):
         self.ready()
         self.ok("POST", "/api/message", {"text": self.HOSTILE, "id": "h-1"})
-        self.ok("POST", "/api/directives", {"statement": self.HOSTILE})
+        self.ok("POST", "/api/directives", purpose(self.HOSTILE))
         # Pages are fixed templates: no Kairo text is ever put into HTML on the server.
         for path in ["/", "/login", "/login?failed"]:
             page = self.get(path).text
@@ -754,7 +761,8 @@ class ContentTest(DashboardCase):
                 self.assertLogs("kairo.dashboard", "INFO") as logs:
             self.ready()
             self.ok("POST", "/api/message", {"text": f"the key is {SECRET}", "id": "s-1"})
-            self.ok("POST", "/api/directives", {"statement": f"Rotate {SECRET}"})
+            self.ok("POST", "/api/directives", {"statement": f"Rotate {SECRET}",
+                                                "description": f"Rotate {SECRET} monthly."})
             bodies = []
             for path in ["/", "/login", "/static/app.js", "/api/status", "/api/situation",
                          "/api/chat", "/api/directives", "/api/dashboard"]:
@@ -818,7 +826,7 @@ class BoundaryTest(DashboardCase):
         runtime = self.ready()
         self.stop_kairo()
         for path, fields in [("/api/message", {"text": "hello"}),
-                             ("/api/directives", {"statement": "Keep it up"}),
+                             ("/api/directives", purpose("Keep it up")),
                              ("/api/wake", {}), ("/api/stop", {})]:
             self.fails(self.post(path, fields), 503, "unreachable")
         memory = Memory(self.db)
@@ -905,7 +913,7 @@ class ConcurrencyTest(DashboardCase):
 
     def test_simultaneous_directive_toggles_have_one_winner(self):
         runtime = self.ready()
-        directive = self.ok("POST", "/api/directives", {"statement": "Keep it up"})["directive"]
+        directive = self.ok("POST", "/api/directives", purpose("Keep it up"))["directive"]
         results = self.run_all(lambda i: self.post("/api/directives/deactivate",
                                                    {"id": directive["id"]}).status, 6)
         self.assertEqual(sorted(results), [200] + [409] * 5)
@@ -921,7 +929,7 @@ class RestartTest(DashboardCase):
         first = self.ready()
         identity = first.identity["id"]
         self.ok("POST", "/api/message", {"text": "Remember me", "id": "r-1"})
-        directive = self.ok("POST", "/api/directives", {"statement": "Keep going"})["directive"]
+        directive = self.ok("POST", "/api/directives", purpose("Keep going"))["directive"]
         self.stop_kairo()
         self.fails(self.get("/api/status"), 503, "unreachable")
 

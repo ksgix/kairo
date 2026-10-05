@@ -57,8 +57,11 @@ TRANSITIONS: dict[WorkState, frozenset[WorkState]] = {
 }
 
 # Maximum characters per cognition-written field. Longer requests are rejected,
-# not silently cut, so cognition learns the bound.
-TEXT_LIMITS = {"objective": 300, "why": 500, "strategy": 600, "understanding": 1000,
+# not silently cut, so cognition learns the bound. ``understanding`` is the work's
+# current synthesis (what is known, tried, failed and why, constraints, open
+# questions), rewritten as a whole when it changes: room for a long-lived problem,
+# not a log. The situation bounds the total shown across open work.
+TEXT_LIMITS = {"objective": 300, "why": 500, "strategy": 600, "understanding": 10_000,
                "next_step": 300, "reason": 500, "ref": 40}
 MAX_REQUESTS = 10      # work requests per decision
 MAX_OPEN = 25          # open work items at once

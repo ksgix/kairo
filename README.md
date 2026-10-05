@@ -64,7 +64,7 @@ The layers, from most lasting to most momentary:
 
 | Layer | What it is |
 |---|---|
-| Directive | A lasting area of responsibility, set by the operator |
+| Directive | A lasting area of responsibility, set by the operator: a statement of the purpose and a description of what it covers. Why Kairo acts; never a task list. |
 | Work | A pursuit carried across cycles: objective, why it matters, strategy, understanding, next step, state. It may belong to a directive or not. |
 | Todo | Operational notes. Not required for work. There is no operator or cognition path to change them yet. |
 | Action | One runtime operation. When linked, it is an attempt at a work item. |
@@ -81,6 +81,7 @@ The layers, from most lasting to most momentary:
 - **Completion basis:** the runtime records it as `verified` (a verifier confirmed at least one cited attempt) or `unverified` (the runtime couldn't check the outcome; the completion is cognition's judgment of results that exited 0). Cognition can't set it. Records written before this field existed show `unknown`.
 - **Retry versus new strategy:** changing the strategy gives it a new revision. Each linked action records the revision it belongs to, so a retry (same revision) is distinguishable from a changed strategy.
 - **One source of truth:** each `work` record is the only authority for that item's current state, with a short log of its own changes. Attempts are not copied into it; they are the action records that point to the work.
+- **Understanding (up to 10,000 characters)** is cognition's current synthesis of the work: what the problem is, what has been found, which approaches were tried and why they failed, constraints, what remains uncertain. It is replaced as a whole on each update: one current state, not a log, a transcript or stored reasoning. It stays labelled as interpretation; the facts stay in the runtime's records. A longer update is rejected whole, never cut.
 
 ## Failure and recovery
 
@@ -92,7 +93,7 @@ The layers, from most lasting to most momentary:
 - **Recovery facts per open work item**, derived from the action log, with no separate failure store:
   - the latest failure, with a bounded error or stderr excerpt;
   - `diagnosis_since_latest_failure`: whether the understanding changed after that failure;
-  - attempts, failures and successes for each of the last 5 strategy revisions;
+  - each of the last 5 strategy revisions, tried or not, with when it was adopted and its attempts, failures and successes;
   - `repeated_identical_failures`.
 
   The work record keeps `understanding_at` and a `strategy_log` of the last 10 strategies.
@@ -131,9 +132,13 @@ An implementation is a local package that gives Kairo capability in a domain: gu
 
 - **Manifest (JSON):**
   - required: `"kairo_implementation": 1`, `id`, `description`;
-  - optional: `version` (a label only), `guidance`, `requires.commands`, `env` (names, each `{"secret": bool}`), `tools`, `checks`.
+  - optional: `version` (a label only), `guidance`, `requires.commands`, `env` (names, each `{"secret": bool}`), `tools`, `checks`, `directives`.
   - Unknown fields are rejected. Every path must stay inside the package, including through symlinks. The manifest declares what a package offers and needs; it grants nothing.
-- **Enablement** is configuration: `--implementations onec,web`, or `all` (default `none`), plus `--implementations-dir`. The catalog is derived from disk each time (`available`, `disabled`, `unmet_requirements`, `broken`, `missing`). There is no registry.
+- **Enablement** is configuration: `--implementations onec,web`, or `all` (default `none`), plus `--implementations-dir`. The catalog is derived from disk each time (`available`, `disabled`, `unassociated`, `unmet_requirements`, `broken`, `missing`). There is no registry.
+- **A package serves directives.** Its manifest names them: `"directives": ["<directive id>", ...]` (at most 16, distinct). Directive = why Kairo acts; implementation = capability available in pursuit of it, never a purpose or an agent.
+  - A package is `available` only while at least one directive it names exists and is active, and none it names is unknown. Otherwise it is `unassociated` (naming none, naming an unknown id, or all of its directives inactive): its tools are not offered and a request for them is refused before anything runs.
+  - The directive states come from the runtime's own directive records, read each time the catalog is derived; there is no second registry. Serving a directive does not enable a package, and enablement and requirements still apply.
+  - Cognition is shown only the packages serving an active directive (each with `serves`), and each active directive lists them; a broken package is listed with its fault only, and the rest are counted (`not_shown`), never described.
 - **Tools are ordinary actions.** Each tool becomes `impl.<id>.<tool>`, and declared checks become `impl.<id>.check` (with `{"name": ...}`). They're listed only while the package is available, and pass through the same parsing, repetition rule, execution, verification and logging as every other action.
   - **Parameters:** validated against a strict JSON Schema subset (an object of string, integer, number, boolean or string-array properties, enums, `required`, `additionalProperties: false`), then passed as JSON on stdin, never on the command line.
   - **Execution:** from the package directory, with no shell, a timeout, and capped, redacted output.
@@ -325,8 +330,8 @@ Retention of old releases and snapshots is a later housekeeping concern.
 | `kairo` | Identity, when Kairo was first created, how many times it has started, and (with deployment configured) `code`: the running release and recent deployments |
 | `now` | Time, lifecycle state, wake reason, current process, the previous process (and whether it ended cleanly), the previous cycle |
 | `environment` | A fresh host observation and what changed since the previous one |
-| `directives` | Active directives with age and open to-do counts, plus the number inactive |
-| `work` | Open work, each with its recent attempts by strategy revision and recent changes, plus recently closed work with reason or evidence |
+| `directives` | Active directives: statement and description (the operator's words), age, open to-do counts and the implementations serving each, plus the number inactive |
+| `work` | Open work, each with its understanding, its recent attempts by strategy revision and recent changes, plus recently closed work with reason or evidence |
 | `todo` | Open items and recently completed ones |
 | `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …) and output, and chat |
 | `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, the open to-do count |
@@ -335,7 +340,9 @@ Retention of old releases and snapshots is a later housekeeping concern.
 | `context` | Limits, redaction and truncation counts, what was trimmed, and anything unavailable |
 
 - **Provenance:** every section names its source, and times carry `age_seconds`. Cognition's own earlier assessments are labelled as interpretation, not fact. Missing data is shown as missing (`"unknown"`, `null`) and never invented.
-- **Bounds:** the most recent 10 cycles, 15 actions and 20 messages; 1,500 characters of output per action stream; 2,000 characters per string; and a 60,000-character total budget, met by dropping the oldest history first. Every omission is counted.
+- **Bounds:** the most recent 10 cycles, 15 actions and 20 messages; 1,500 characters of output per action stream; 2,000 characters per string; and a 60,000-character total budget. Every omission is counted.
+  - Two long texts have their own bounds instead of the 2,000-character cap: work understanding (up to 10,000 per item, 20,000 across open work; active and most recently updated work first, every item keeping at least 1,000) and directive descriptions (up to 4,000 each, 12,000 together, at least 500 each). Shortening keeps the beginning and the end and is marked (`understanding_shortened`, `description_shortened`).
+  - Over budget, the oldest history goes first, down to the newest 5 of each kind; then the longest long texts are shortened toward their floors; only then does the rest of the history go. Work facts (states, attempts, recovery, strategy revisions) are never trimmed.
 - **Robustness:** a corrupt record is reported as unavailable and does not stop the cycle.
 
 To see exactly what cognition would be shown, without starting Kairo or calling a provider:
@@ -383,7 +390,7 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
 | `chat [--limit N] [--after SEQ]` | `chat` | the conversation, human messages and Kairo's replies, in order, with sequence numbers |
 | `message TEXT [--id ID]` | `message` | a human message: persisted, then Kairo wakes. The answer comes later, in `chat` |
 | `directives` | `directives` | all directives, active and inactive, with origin and history |
-| `directive add STATEMENT` | `directive.add` | a new lasting area of responsibility |
+| `directive add STATEMENT --description TEXT` | `directive.add` | a new lasting area of responsibility: the purpose and what it covers |
 | `directive deactivate ID` / `directive activate ID` | `directive.deactivate` / `directive.activate` | stop, or resume, pursuing a directive |
 | `wake [REASON]` | `wake` | reassess now. Not "do X" |
 | `stop` | `stop` | stop the runtime gracefully; the stop reason is recorded |
@@ -404,6 +411,7 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
   - Directives are never edited or deleted, only deactivated and activated again, so Work linked to one keeps its meaning.
   - Each records `origin: "operator"` and a history (`created`, `deactivated`, `activated`, with time and origin).
   - A statement is 1–500 characters, and an active duplicate (same words, any case or spacing) is refused.
+  - A description (required, 1–4,000 characters) says what the purpose covers: intent, scope, expectations, boundaries. Kairo decides the concrete work itself. Directives created before descriptions existed show none.
 - **Evidence.**
   - Messages, directives and their history are persisted records.
   - Wakes appear as the lifecycle and cycle wake reason.
@@ -489,7 +497,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 | `GET /api/chat?limit=N&after=SEQ` | `chat` |
 | `GET /api/directives` | `directives` |
 | `POST /api/message` `{"text", "id"}` | `message` |
-| `POST /api/directives` `{"statement"}` | `directive.add` |
+| `POST /api/directives` `{"statement", "description"}` | `directive.add` |
 | `POST /api/directives/deactivate` / `activate` `{"id"}` | `directive.deactivate` / `directive.activate` |
 | `POST /api/wake` `{"reason"}` | `wake` |
 | `POST /api/stop` | `stop` |
@@ -506,7 +514,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 
 - Overview: state, counts, last cognition result, what needs attention, recent activity.
 - Chat: send messages; a retry reuses the message id, so Kairo stores the message once.
-- Directives: add, deactivate, activate, with history and linked work.
+- Directives: each as one of Kairo's responsibilities (statement, description, state, origin, linked open work, the implementations naming it, history); add with a statement and a description; deactivate, activate.
 - Work: facts, cognition's account, attempts, recovery, unresolved external operations.
 - Todo (read-only).
 - Activity: cycles, actions, deployments.
@@ -544,7 +552,7 @@ cd /opt/kairo
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-The tests need no network, credentials or third-party packages.
+The tests need no network, credentials or third-party packages. One dashboard test also runs the dashboard's own `app.js` in a minimal DOM (`tests/dashboard_dom.mjs`, not a browser) when `node` is installed, and is skipped otherwise.
 
 ## Deliberately not implemented yet
 

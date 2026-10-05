@@ -259,7 +259,8 @@
     const open = (sit.work || {}).open || [];
     out.push(el("div", {class: "grid"},
       card("Active directives", active.length ? el("ul", null, active.map((d) =>
-        el("li", null, prov("operator"), d.statement, el("span", {class: "muted"}, ` · since ${when(d.since)}`))))
+        el("li", null, prov("operator"), d.statement, el("span", {class: "muted"}, ` · since ${when(d.since)}`),
+          d.description ? el("div", {class: "muted description"}, d.description) : null)))
         : el("p", {class: "muted"}, "No active directive: Kairo has no lasting purpose besides messages.")),
       card("Open work", open.length ? el("ul", null, open.map((w) =>
         el("li", null, stateBadge(w.state), " ", el("span", {class: "interp-text"}, w.objective),
@@ -321,18 +322,35 @@
     for (const w of ((S.situation || {}).work || {}).open || []) {
       if (w.directive_id) (linked[w.directive_id] = linked[w.directive_id] || []).push(w);
     }
-    const statement = field("input", "directive", {placeholder: "A lasting area of responsibility, e.g. “Keep the backups verified”", maxlength: 500});
+    // Which implementation packages name each directive (the operator's view of the
+    // catalog, from status): serving it now, or naming it without serving.
+    const impls = ((S.status || {}).implementations || []);
+    const statement = field("input", "directive", {placeholder: "The purpose, concisely, e.g. “Keep the backups verified and restorable”", maxlength: 500, required: true});
+    const description = field("textarea", "directive-description", {placeholder: "What this purpose covers: its intent, scope, expectations and boundaries. Kairo decides the concrete work itself.", maxlength: 4000, rows: 5, required: true});
     const note = el("p", {class: "muted"});
     out.push(card("Add a directive", el("p", {class: "muted"},
-      "A directive is Kairo's purpose: a lasting area of responsibility, not a task or command. Adding one executes nothing; Kairo reassesses with it from its next cycle."),
-      el("div", {class: "row"}, statement, el("button", {type: "button", onclick: async () => {
-        if (!statement.value.trim()) return;
-        const r = await api("/api/directives", {statement: statement.value});
+      "A directive is Kairo's purpose: a lasting area of responsibility, not a task or command. Adding one executes nothing and creates no work; Kairo reassesses with it from its next cycle and decides itself what, if anything, is worth pursuing for it."),
+      el("label", {for: "directive"}, "Statement (required)"),
+      el("p", {class: "muted hint"}, "The enduring purpose, in one sentence: why Kairo acts."), statement,
+      el("label", {for: "directive-description"}, "Description (required)"),
+      el("p", {class: "muted hint"}, "What the purpose means: its scope, what is worthwhile within it, expectations and boundaries. Not a task list."),
+      description,
+      el("div", {class: "row"}, el("button", {type: "button", onclick: async () => {
+        if (!statement.value.trim() || !description.value.trim()) {
+          note.textContent = "Both a statement and a description are needed.";
+          return;
+        }
+        const r = await api("/api/directives", {statement: statement.value, description: description.value});
         note.textContent = r.ok ? "Added." : `Refused: ${r.error} (${r.code})`;
-        if (r.ok) { S.drafts.directive = ""; await loadDirectives(); render(); note.textContent = "Added."; }
-      }}, "Add")), note));
+        if (r.ok) {
+          S.drafts.directive = ""; S.drafts["directive-description"] = "";
+          await loadDirectives(); render(); note.textContent = "Added.";
+        }
+      }}, "Add directive")), note));
     if (!S.directives) { out.push(card("Directives", errorBox(S.directivesErr, "directives could not be read") || "Loading…")); return out; }
-    const rows = S.directives.directives.slice().reverse().map((d) => {
+    const items = S.directives.directives.slice().reverse();
+    if (!items.length) out.push(card("Directives", el("p", {class: "muted"}, "No directives yet: Kairo has no lasting purpose besides messages.")));
+    for (const d of items) {
       const toggle = el("button", {type: "button", class: d.active ? "danger" : "", onclick: async () => {
         const verb = d.active ? "deactivate" : "activate";
         if (!confirm(`${verb[0].toUpperCase() + verb.slice(1)} this directive?\n\n${d.statement}`)) return;
@@ -340,18 +358,29 @@
         if (!r.ok) alert(`Refused: ${r.error} (${r.code})`);
         await loadDirectives(); render();
       }}, d.active ? "Deactivate" : "Activate");
-      return el("tr", null,
-        el("td", null, prov("operator"), d.statement),
-        el("td", null, badge(d.active ? "active" : "inactive", d.active ? "ok" : "")),
-        el("td", null, d.origin || "—", el("br"), el("span", {class: "muted"}, epoch(d.created_at))),
-        el("td", null, (d.history || []).map((h) => el("div", {class: "muted"}, `${h.event} · ${epoch(h.at)}${h.by ? " · " + h.by : ""}`))),
-        el("td", null, (linked[d.id] || []).map((w) => el("div", null, stateBadge(w.state), " ", w.objective))),
-        el("td", null, toggle));
-    });
-    out.push(card("Directives", prov("fact"), el("span", {class: "muted"}, " Never edited or deleted: deactivate, and activate again."),
-      el("div", {class: "scroll"}, el("table", null,
-        el("thead", null, el("tr", null, ["statement", "state", "origin / created", "history", "open work", ""].map((h) => el("th", null, h)))),
-        el("tbody", null, rows.length ? rows : el("tr", null, el("td", {colspan: 6}, "No directives yet.")))))));
+      const named = impls.filter((i) => (i.directives || []).includes(d.id));
+      const work = linked[d.id] || [];
+      out.push(el("section", {class: "card directive"},
+        el("div", {class: "row"},
+          el("h2", null, prov("operator"), " ", d.statement),
+          badge(d.active ? "active" : "inactive", d.active ? "ok" : ""), toggle),
+        d.description
+          ? el("p", {class: "description"}, d.description)
+          : el("p", {class: "muted"}, "No description recorded (created before directives had descriptions)."),
+        el("p", {class: "muted"}, `${d.origin ? "set by " + d.origin : "origin not recorded"} · created ${epoch(d.created_at)} · ${short(d.id)}`),
+        el("div", {class: "grid"},
+          el("div", null, sub("Open work for it"), prov("fact"),
+            work.length ? el("ul", null, work.map((w) => el("li", null, stateBadge(w.state), " ", el("span", {class: "interp-text"}, w.objective))))
+              : el("p", {class: "muted"}, d.active ? "None right now: Kairo decides what, if anything, is worth pursuing." : "None.")),
+          el("div", null, sub("Implementations"), prov("fact"),
+            named.length ? el("ul", null, named.map((i) => el("li", null, i.id, " ",
+              (i.serves || []).includes(d.id) ? badge(i.state, i.state === "available" ? "ok" : "warn") : badge(i.state || "not serving", ""),
+              i.reason ? el("span", {class: "muted"}, ` ${i.reason}`) : null)))
+              : el("p", {class: "muted"}, "No implementation package names this directive."))),
+        el("details", null, el("summary", null, `History (${(d.history || []).length})`),
+          el("ul", null, (d.history || []).map((h) => el("li", {class: "muted"}, `${h.event} · ${epoch(h.at)}${h.by ? " · " + h.by : ""}`))))));
+    }
+    out.push(el("p", {class: "muted"}, "Directives are never edited or deleted: to change a purpose, add a new directive and deactivate the old one. Their history stays."));
     return out;
   }
 
@@ -392,7 +421,11 @@
             el("li", null, `${u.kind} · key ${short(u.operation_key)} · ${u.state} · ${u.resumable ? "resumable" : "settle by verification"}`)))) : null),
         el("div", null, sub("Cognition's account"), kv([
           ["why", interp(w.why)], ["strategy", interp((w.strategy || {}).text)],
-          ["understanding", interp(w.understanding)], ["next step", interp(w.next_step)],
+          ["understanding", w.understanding_shortened
+            ? el("div", null, interp(w.understanding), el("div", {class: "muted"},
+                `Shown ${w.understanding_shortened.shown_chars} of ${w.understanding_shortened.full_chars} characters, as cognition sees it (context bound).`))
+            : interp(w.understanding)],
+          ["next step", interp(w.next_step)],
           ["state reason", w.state_reason ? interp(w.state_reason) : undefined],
         ]))),
       sub("Recent attempts"), attemptsTable(w.recent_attempts),

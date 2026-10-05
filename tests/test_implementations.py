@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from kairo import Action, Decision, Memory, Runtime, State
+from kairo.directives import Directive
 from kairo.claude import ClaudeCognition
 from kairo.cognition import Cognition, CognitionError, parse_decision
 from kairo.environment import ACTIONS, Environment
@@ -32,6 +33,9 @@ from test_continuous import TIMEOUT
 from test_work import Script, create, only_open, plan, set_state, update
 
 PY = sys.executable
+# The directive every test package serves unless a test says otherwise: packages
+# are available only while they serve an existing, active directive.
+DIRECTIVE = "d-impl-tests"
 
 ECHO_TOOL = r'''
 import json, os, sys
@@ -49,7 +53,8 @@ def pkg(root, pid, manifest=None, files=None, **fields):
         (path / rel).parent.mkdir(parents=True, exist_ok=True)
         (path / rel).write_text(content)
     data = manifest if manifest is not None else {
-        "kairo_implementation": 1, "id": pid, "description": f"{pid} capability", **fields}
+        "kairo_implementation": 1, "id": pid, "description": f"{pid} capability",
+        "directives": [DIRECTIVE], **fields}
     (path / "implementation.json").write_text(
         data if isinstance(data, str) else json.dumps(data))
     return path
@@ -57,6 +62,13 @@ def pkg(root, pid, manifest=None, files=None, **fields):
 
 def tool(name="run", script="tools/run.py", **extra):
     return {"name": name, "description": f"{name} tool", "run": ["python3", script], **extra}
+
+
+def serve_tests(runtime):
+    """The directive the test packages serve, as a real record."""
+    if runtime.directives.get(DIRECTIVE) is None:
+        runtime.directives.save(Directive("Exercise implementation packages", id=DIRECTIVE,
+                                          description="Test fixture purpose.", origin="operator"))
 
 
 class ImplCase(unittest.TestCase):
@@ -67,8 +79,9 @@ class ImplCase(unittest.TestCase):
         self.root.mkdir()
         self.tmp = Path(tmp.name)
 
-    def impls(self, enabled="all"):
-        return Implementations(self.root, enabled)
+    def impls(self, enabled="all", directives=None):
+        states = {DIRECTIVE: True} if directives is None else directives
+        return Implementations(self.root, enabled, directives=lambda: states)
 
     def entry(self, pid, enabled="all"):
         return {e.id: e for e in self.impls(enabled).catalog()}[pid]
@@ -76,7 +89,9 @@ class ImplCase(unittest.TestCase):
     def runtime(self, cognition=None, enabled="all", path=":memory:", **kwargs):
         memory = Memory(path)
         self.addCleanup(memory.close)
-        return Runtime(memory, Environment(self.impls(enabled)), cognition=cognition, **kwargs)
+        rt = Runtime(memory, Environment(self.impls(enabled)), cognition=cognition, **kwargs)
+        serve_tests(rt)  # the runtime confirms associations from its own records
+        return rt
 
     def assertBroken(self, pid, fragment):
         e = self.entry(pid)
@@ -670,6 +685,9 @@ class CliTest(ImplCase):
         pkg(self.root, "alpha")
         env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")}
         db = self.tmp / "k.db"
+        memory = Memory(db)
+        serve_tests(Runtime(memory))  # the directive alpha serves exists in this database
+        memory.close()
         out = subprocess.run([PY, "-m", "kairo", "--situation", "--db", str(db),
                               "--implementations-dir", str(self.root), "--implementations", "alpha"],
                              capture_output=True, text=True, env=env, timeout=TIMEOUT)
