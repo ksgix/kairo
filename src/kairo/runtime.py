@@ -69,6 +69,14 @@ CHAT_PAGE = 200        # messages in one chat read
 CHAT_TEXT = 8000       # characters of one message in a chat read (the record keeps all)
 DIRECTIVE_PAGE = 200   # directives in one read
 
+# Pacing: how the runtime keeps a failing or spinning cognition from running hot.
+# Both are runtime facts about cycles; neither judges what cognition decided.
+FAILURE_BACKOFF = 60.0        # seconds before retrying after one failed cognition cycle
+FAILURE_BACKOFF_MAX = 3600.0  # the retry delay doubles per consecutive failure up to this
+STALL_LIMIT = 5               # consecutive cycles that change nothing and do not rest
+STALL_WAKE = 30.0             # a sleep shorter than this, after changing nothing, is not rest
+STALL_REST = 300.0            # seconds the runtime then rests (or reassess_after, if longer)
+
 
 @dataclass(frozen=True)
 class Step:
@@ -133,6 +141,8 @@ class Runtime:
         # release proved unusable before confirming itself.
         self.exit_code = 0
         self._restart_for: str | None = None  # the deploy action that requested a restart
+        self._failures = 0  # consecutive cycles in which cognition failed
+        self._stalled = 0   # consecutive cycles that changed nothing and did not rest
         self._awaiting_deploy: str | None = None  # our own deployment, not yet confirmed
 
     # -- lifecycle ---------------------------------------------------------
@@ -661,6 +671,7 @@ class Runtime:
 
         context = self.context()
         steps, note, cognition, sleep_reason, wake_after = self._decide_and_act(context)
+        sleep_reason, wake_after = self._pace(cognition, steps, sleep_reason, wake_after)
         if self._restart_for is not None:  # a deployment switched releases: no sleep, exit
             sleep_reason = None
         summary = {
@@ -684,6 +695,48 @@ class Runtime:
         if sleep_reason is not None:
             self.sleep(sleep_reason, wake_after)
         return CycleReport(self.state, steps, note=note, cognition=cognition)
+
+    def _pace(self, cognition: dict[str, Any], steps: list[Step], sleep_reason: str | None,
+              wake_after: float | None) -> tuple[str | None, float | None]:
+        """Keep a failing or spinning cognition from running hot. Returns the
+        (sleep reason, wake_after) the cycle ends with.
+
+        A failed cycle is retried after a delay that doubles per consecutive
+        failure (FAILURE_BACKOFF up to FAILURE_BACKOFF_MAX), whatever the default
+        reassessment is: never at once, and never "sleep until woken".
+
+        A decided cycle that changed nothing (no action ran, no work request was
+        applied, no reply was posted) and did not rest (stayed awake, or asked to
+        be woken in under STALL_WAKE seconds) is a stall. After STALL_LIMIT in a
+        row the runtime rests by itself. Any wake still interrupts either rest."""
+        result = cognition.get("result")
+        if result == "failed":
+            self._failures += 1
+            self._stalled = 0
+            delay = min(FAILURE_BACKOFF * 2 ** (self._failures - 1), FAILURE_BACKOFF_MAX)
+            cognition["consecutive_failures"] = self._failures
+            cognition["retry_after"] = delay
+            return (f"{sleep_reason}; retry in {round(delay)}s "
+                    f"(failure {self._failures} in a row)"), delay
+        self._failures = 0
+        if result != "decided":
+            return sleep_reason, wake_after
+        progressed = bool(steps or (cognition.get("work") or {}).get("applied")
+                          or cognition.get("replies"))
+        rested = sleep_reason is not None and (wake_after is None or wake_after >= STALL_WAKE)
+        if progressed or rested:
+            self._stalled = 0
+            return sleep_reason, wake_after
+        self._stalled += 1
+        if self._stalled < STALL_LIMIT:
+            return sleep_reason, wake_after
+        self._stalled = 0
+        delay = max(self.reassess_after or 0.0, STALL_REST)
+        cognition["forced_rest"] = {"stalled_cycles": STALL_LIMIT, "seconds": delay}
+        log.warning("%d cycles in a row changed nothing and did not rest; resting %ds",
+                    STALL_LIMIT, delay)
+        return (f"rested by the runtime: {STALL_LIMIT} cycles in a row changed nothing and "
+                "did not rest"), delay
 
     def _decide_and_act(
         self, context: Context,

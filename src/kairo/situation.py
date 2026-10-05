@@ -262,6 +262,9 @@ def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             item["failure_detail"] = rec.get("note")  # written by the runtime: a fact
             item["providers_tried"] = [{"provider": a.get("provider"), "outcome": a.get("outcome")}
                                        for a in cog.get("attempts") or [] if isinstance(a, dict)]
+            if cog.get("consecutive_failures"):  # runtime pacing: the retry backs off
+                item["consecutive_failures"] = cog.get("consecutive_failures")
+                item["retry_after_seconds"] = cog.get("retry_after")
         elif cog.get("result") == "decided":
             item["requested_actions"] = [a.get("id") for a in rec.get("actions") or []]
             item["replies"] = cog.get("replies")
@@ -272,6 +275,8 @@ def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             if work:
                 item["work_applied"] = work.get("applied") or []
                 item["work_rejected"] = work.get("rejected") or []
+            if cog.get("forced_rest"):  # the runtime rested by itself after stalled cycles
+                item["rested_by_runtime"] = cog.get("forced_rest")
         items.append(item)
     return {
         "source": "runtime cycle log",
