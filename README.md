@@ -554,6 +554,28 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 The tests need no network, credentials or third-party packages. One dashboard test also runs the dashboard's own `app.js` in a minimal DOM (`tests/dashboard_dom.mjs`, not a browser) when `node` is installed, and is skipped otherwise.
 
+`scripts/test.sh` runs the same suite from any directory, or the named modules or tests (`scripts/test.sh test_work`).
+
+### Developing with Claude Code
+
+`scripts/setup-claude-code.sh` writes this checkout's Claude Code permissions to `.claude/settings.local.json`. The file is machine-specific and ignored by git. Run the script as the account that runs Claude Code, then restart Claude Code from the project root. It preserves unrelated settings, refuses existing rules that would defeat the model (such as `Bash(*)` or a `sudo` wildcard), and `--dry-run` shows the changes without writing.
+
+- **Mode:** `dontAsk`. Anything not allowed is denied without waiting for a person.
+- **Allowed:**
+  - reading and editing project files;
+  - the read-only commands Claude Code vets itself (`git status`/`diff`/`log`, `ls`, …);
+  - `git add`, `commit`, `rm`, `mv`, `switch -c` and `tag -a`;
+  - `git fetch origin`, `git pull --ff-only origin main` and `git push origin main`;
+  - `scripts/test.sh`;
+  - `status`, `is-active` and `restart` of `kairo` and `kairo-dashboard`.
+- **Denied:**
+  - edits to `.claude/`, `.git/`, the bootstrap script and `~/.claude` (the policy cannot rewrite itself);
+  - the credential files;
+  - any other `sudo` or `systemctl` action;
+  - interpreters and package managers with free arguments;
+  - any other git network operation.
+- **Not a sandbox:** the tests run project code, which Claude Code can edit, as the same account, so editing plus testing amounts to running any code that account can run. The rules bound what Claude Code does directly; isolation from the host needs an OS boundary, such as Claude Code's sandbox (which needs `bubblewrap` and `socat`) or a separate account without sudo.
+
 ## Deliberately not implemented yet
 
 - Delegation between providers, and providers other than Claude (the provider interface supports them)
