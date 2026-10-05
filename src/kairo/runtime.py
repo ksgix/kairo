@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import logging
 import threading
 import time
@@ -77,6 +78,12 @@ STALL_LIMIT = 5               # consecutive cycles that change nothing and do no
 STALL_WAKE = 30.0             # a sleep shorter than this, after changing nothing, is not rest
 STALL_REST = 300.0            # seconds the runtime then rests (or reassess_after, if longer)
 
+REASSESS = "reassessment due"  # the wake reason when a sleep's own deadline passes
+# Quiet: with probes configured and no work active, a timer wake at which nothing
+# the runtime observes has changed since cognition last chose to do nothing gets the
+# same answer without asking. Cognition is still consulted at least this often.
+QUIET_MAX = 6 * 3600.0
+
 
 @dataclass(frozen=True)
 class Step:
@@ -131,7 +138,7 @@ class Runtime:
         self._wake_pending: str | None = None
         self._wake_deadline: float | None = None  # time.monotonic() value
         self._wake_at: float | None = None  # the same deadline as wall-clock time
-        self._deadline_reason = "reassessment due"  # wake reason when the deadline passes
+        self._deadline_reason = REASSESS  # wake reason when the deadline passes
         self._since: float | None = None  # when the current state began
         self._process_started_at: float | None = None
         self._cycles = 0  # cycles completed by this process
@@ -143,6 +150,10 @@ class Runtime:
         self._restart_for: str | None = None  # the deploy action that requested a restart
         self._failures = 0  # consecutive cycles in which cognition failed
         self._stalled = 0   # consecutive cycles that changed nothing and did not rest
+        # Set when cognition chose to do nothing with no work active and probes
+        # configured: {"fingerprint", "since", "wake_after", "skipped"}. See _unchanged.
+        self._quiet: dict[str, Any] | None = None
+        self.quiet_max = QUIET_MAX
         self._awaiting_deploy: str | None = None  # our own deployment, not yet confirmed
 
     # -- lifecycle ---------------------------------------------------------
@@ -303,7 +314,7 @@ class Runtime:
             now = time.time()
             delay = wake_after if wake_after is not None else self.reassess_after
             at = now + delay if delay is not None else None
-            self._deadline_reason = "reassessment due"
+            self._deadline_reason = REASSESS
             # Waiting work is reassessed when its wait runs out. Only future
             # deadlines count: an elapsed wait is already visible to cognition.
             waiting = self._next_wait(now)
@@ -372,6 +383,8 @@ class Runtime:
                 "starts": self.identity.get("starts"),
                 "running": self._running,
                 "wake_at": self._wake_at if self.state is State.SLEEPING else None,
+                # Timer wakes at which nothing had changed and cognition was not asked.
+                "quiet_wakes": self._quiet["skipped"] if self._quiet else 0,
             }
         deployment = self._deployment()
         if deployment is not None:  # the release this process imported (not HEAD, not 'current')
@@ -567,6 +580,8 @@ class Runtime:
                 "previous_process": self.previous,
                 "default_reassess_after": self.reassess_after,
                 "verifiers": sorted(set(self.verifiers) | self._environment_verified()),
+                "quiet": None if self._quiet is None else {
+                    "since": self._quiet["since"], "skipped": self._quiet["skipped"]},
             }
         try:
             observation = self.environment.observe()
@@ -670,8 +685,11 @@ class Runtime:
             self._wake_pending = None
 
         context = self.context()
+        if self._unchanged(context):
+            return self._stay_quiet()
         steps, note, cognition, sleep_reason, wake_after = self._decide_and_act(context)
         sleep_reason, wake_after = self._pace(cognition, steps, sleep_reason, wake_after)
+        self._note_quiet(context, cognition, steps, sleep_reason, wake_after)
         if self._restart_for is not None:  # a deployment switched releases: no sleep, exit
             sleep_reason = None
         summary = {
@@ -695,6 +713,73 @@ class Runtime:
         if sleep_reason is not None:
             self.sleep(sleep_reason, wake_after)
         return CycleReport(self.state, steps, note=note, cognition=cognition)
+
+    # -- quiet: no cognition when nothing observable changed -------------------
+
+    def _fingerprint(self, context: Context) -> str | None:
+        """Everything the runtime itself can see change between two timer wakes:
+        the observation (with probes), messages, directives, work, actions and
+        implementations. None when any of it cannot be read."""
+        try:
+            facts = {
+                "observation": redact(context.environment),
+                "counts": {k: context.counts.get(k) for k in ("message", "action", "work")},
+                "directives": sorted((d.id, d.active) for d in self.directives.all()),
+                "work": sorted((w.id, str(w.state), w.updated_at) for w in self.work.open()),
+                "implementations": [(i.get("id"), i.get("state"), i.get("digest"))
+                                    for i in context.implementations if isinstance(i, dict)],
+                "unreadable": context.runtime.get("unreadable_records"),
+            }
+            return hashlib.sha256(json.dumps(facts, sort_keys=True, default=str).encode()
+                                  ).hexdigest()
+        except Exception:
+            return None
+
+    def _note_quiet(self, context: Context, cognition: dict[str, Any], steps: list[Step],
+                    sleep_reason: str | None, wake_after: float | None) -> None:
+        """After a cycle: remember what the runtime observed if cognition, shown
+        it, chose to do nothing and sleep, while no work was active and at least
+        one probe is configured (without probes the runtime has no senses of its
+        own, so an unchanged observation would prove nothing)."""
+        self._quiet = None
+        if (cognition.get("result") != "decided" or sleep_reason is None or steps
+                or cognition.get("forced_rest") or cognition.get("replies")
+                or (cognition.get("work") or {}).get("applied")
+                or not any(str(k).startswith("probe.") for k in context.environment)):
+            return
+        try:
+            if any(w.state == WorkState.ACTIVE for w in self.work.open()):
+                return
+        except Exception:
+            return
+        fingerprint = self._fingerprint(context)
+        if fingerprint is not None:
+            self._quiet = {"fingerprint": fingerprint, "since": time.time(),
+                           "wake_after": wake_after, "skipped": 0}
+
+    def _unchanged(self, context: Context) -> bool:
+        """Whether this wake needs no cognition: it is the sleep's own timer, and
+        nothing the runtime observes has changed since cognition last chose to do
+        nothing (see _note_quiet). Any other wake (a message, the operator, a
+        directive, a work wait, a start) always reaches cognition, and so does
+        the timer once quiet_max has passed."""
+        quiet = self._quiet
+        return (quiet is not None and self.cognition is not None
+                and context.wake_reason == REASSESS and self._awaiting_deploy is None
+                and time.time() - quiet["since"] < self.quiet_max
+                and self._fingerprint(context) == quiet["fingerprint"])
+
+    def _stay_quiet(self) -> CycleReport:
+        """Sleep again as cognition last chose to, without consulting it. No cycle
+        is recorded (the cycle log stays cognition's own); the count is shown to
+        cognition at its next cycle and to the operator in status."""
+        quiet = self._quiet or {}
+        quiet["skipped"] = quiet.get("skipped", 0) + 1
+        note = (f"nothing observable changed since {_utc(quiet.get('since'))}; cognition not "
+                f"consulted ({quiet['skipped']} timer wake(s))")
+        self.sleep(note, quiet.get("wake_after"))
+        return CycleReport(self.state, [], note=note,
+                           cognition={"result": "skipped", "skipped": quiet["skipped"]})
 
     def _pace(self, cognition: dict[str, Any], steps: list[Step], sleep_reason: str | None,
               wake_after: float | None) -> tuple[str | None, float | None]:
@@ -902,6 +987,11 @@ class Runtime:
         if result.restart and action.kind == deploy.KIND:
             self._request_restart(action.id)
         return Step(action, result, verification)
+
+
+def _utc(t: Any) -> str:
+    return (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+            if isinstance(t, (int, float)) else "an earlier cycle")
 
 
 def operator_message_id(client_id: str) -> str:

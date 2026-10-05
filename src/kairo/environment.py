@@ -12,6 +12,8 @@ import getpass
 import json
 import os
 import platform
+import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -27,13 +29,22 @@ from kairo.implementations import (
     PREFIX, ImplementationError, Implementations, Operation, Package, check_action_params,
     check_params,
 )
-from kairo.redact import env_owner, protected_files, scrubbed_env
+from kairo.redact import env_owner, head_tail, protected_files, redact, scrubbed_env
 from kairo.verification import Outcome, Verification
 
 DEFAULT_TIMEOUT = 300.0  # seconds; an action must never block the runtime forever
 MAX_CAPTURE = 1_000_000  # bytes of stdout / stderr kept per stream: its head and its tail
 OUTPUT_LIMIT = 8_000_000  # bytes a program may write to one stream before it is stopped
 PUMP_JOIN = 2.0  # seconds to wait for output still held open by an escaped descendant
+
+# Probes: fixed commands the operator configures, which the runtime itself runs at
+# every observation (no cognition involved). They are Kairo's senses: what a probe
+# prints is part of the observation, so a change is visible without any action.
+PROBE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+MAX_PROBES = 8
+PROBE_TIMEOUT = 10.0  # seconds one probe may run
+PROBE_OUTPUT = 400    # characters kept of what a probe printed (beginning and end)
+PROBE_REUSE = 5.0     # seconds a result is reused: operator reads observe too
 
 # The action interface, described for cognition. Keys are Action.kind values;
 # "params" is a JSON Schema for Action.params.
@@ -59,12 +70,40 @@ ACTIONS: dict[str, dict[str, Any]] = {
 }
 
 
+def parse_probe(spec: str) -> tuple[str, list[str]]:
+    """One ``NAME=COMMAND`` probe setting as (name, argv). The command is split
+    like a shell would split it, but it is run directly, without a shell."""
+    name, sep, command = spec.partition("=")
+    if not sep or not PROBE_NAME.match(name):
+        raise ValueError(f"probe {spec!r}: expected NAME=COMMAND, NAME matching "
+                         f"{PROBE_NAME.pattern}")
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise ValueError(f"probe {name!r}: {exc}") from None
+    if not argv:
+        raise ValueError(f"probe {name!r}: no command")
+    return name, argv
+
+
 class Environment:
     def __init__(self, implementations: Implementations | None = None,
-                 deployment: deploy.Deployment | None = None) -> None:
+                 deployment: deploy.Deployment | None = None,
+                 probes: dict[str, list[str]] | None = None) -> None:
         self.implementations = implementations
         # Configured only for a supervised release layout (see kairo.deploy).
         self.deployment = deployment
+        probes = dict(probes or {})
+        if len(probes) > MAX_PROBES:
+            raise ValueError(f"at most {MAX_PROBES} probes")
+        for name, argv in probes.items():
+            if not PROBE_NAME.match(name) or not argv or not all(
+                    isinstance(a, str) and a for a in argv):
+                raise ValueError(f"probe {name!r}: a name matching {PROBE_NAME.pattern} and "
+                                 "a non-empty command")
+        self.probes = probes
+        self._probe_lock = threading.Lock()
+        self._probed: tuple[float, dict[str, Any]] | None = None  # (monotonic time, results)
 
     def actions(self) -> dict[str, dict[str, Any]]:
         """The structured actions this environment can execute: the core ones
@@ -135,7 +174,22 @@ class Environment:
             "uid": os.getuid(),
             "cwd": os.getcwd(),
             "python": sys.version.split()[0],
+            **{f"probe.{name}": result for name, result in self._probe().items()},
         }
+
+    def _probe(self) -> dict[str, Any]:
+        """Run every configured probe (a result younger than PROBE_REUSE is
+        reused). A probe that cannot run is itself an observation, never an error."""
+        probes = getattr(self, "probes", None)
+        if not probes:
+            return {}
+        with self._probe_lock:
+            now = time.monotonic()
+            if self._probed is not None and now - self._probed[0] < PROBE_REUSE:
+                return self._probed[1]
+            results = {name: _run_probe(argv) for name, argv in sorted(probes.items())}
+            self._probed = (time.monotonic(), results)
+            return results
 
     def execute(self, action: Action) -> ActionResult:
         match action.kind:
@@ -189,6 +243,27 @@ class Environment:
                           stdin=json.dumps(action.params).encode())
         result = dataclasses.replace(result, implementation=provenance)
         return _external_outcome(result) if tool.effects == "external" else result
+
+
+def _run_probe(argv: list[str]) -> dict[str, Any]:
+    """What one probe showed: its exit code and what it printed (stdout, or stderr
+    when stdout is empty), redacted and bounded so that the same state always
+    reads the same. ``exit`` is None when it did not exit by itself."""
+    try:
+        code, stdout, stderr = run_contained(argv, cwd=None, env=scrubbed_env(),
+                                             timeout=PROBE_TIMEOUT)
+    except FileNotFoundError:
+        return {"exit": None, "failure": "not_found"}
+    except PermissionError:
+        return {"exit": None, "failure": "permission_denied"}
+    except subprocess.TimeoutExpired:
+        return {"exit": None, "failure": "timed_out"}
+    except OutputLimitExceeded:
+        return {"exit": None, "failure": "output_limit"}
+    except (OSError, ValueError):
+        return {"exit": None, "failure": "os_error"}
+    text = stdout.strip() or stderr.strip()
+    return {"exit": code, "output": head_tail(redact(text), PROBE_OUTPUT)}
 
 
 def _execute(action_id: str, argv: list[str], *, cwd: str | None, env: dict[str, str],

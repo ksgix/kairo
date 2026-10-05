@@ -45,7 +45,7 @@ from pathlib import Path
 
 from kairo.cognition import Cognition
 from kairo.deploy import Deployment, PreflightCognition, init_release
-from kairo.environment import Environment
+from kairo.environment import Environment, parse_probe
 from kairo.implementations import ID, Implementations
 from kairo.registry import PROVIDERS, build_cognition
 from kairo.ipc import DEFAULT_SOCKET, IPCError, IPCServer
@@ -83,6 +83,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--implementations-dir", type=Path, metavar="PATH",
                         help="where implementation packages live "
                              "(default: <directory of --db>/implementations)")
+    parser.add_argument("--probe", action="append", default=[], metavar="NAME=COMMAND",
+                        help="a fixed command the runtime itself runs at every observation "
+                             "(no shell; exit code and output become the observation "
+                             "probe.NAME), e.g. web='systemctl is-active nginx'; repeatable. "
+                             "With probes, a timer wake at which nothing changed and no work "
+                             "is active does not consult cognition")
     parser.add_argument("--model", help="shortcut: model for every claude provider "
                                         "(default: the Claude CLI's default)")
     parser.add_argument("--cognition-timeout", type=float, default=300.0, metavar="SECONDS",
@@ -136,7 +142,14 @@ def main(argv: list[str] | None = None) -> int:
                                     running=os.devnull if args.situation else None)
         except ValueError as exc:
             parser.error(str(exc))
-    environment = Environment(Implementations(implementations_dir, enabled), deployment)
+    try:
+        probes = dict(parse_probe(spec) for spec in args.probe)
+        if len(probes) != len(args.probe):
+            raise ValueError("probe names must be distinct")
+        environment = Environment(Implementations(implementations_dir, enabled), deployment,
+                                  probes=probes)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     try:  # one database, one runtime
         lock = lock_database(args.db)  # held until this process ends
@@ -230,6 +243,8 @@ def _preflight_args(args: argparse.Namespace, implementations_dir: Path) -> list
            "--cognition-timeout", str(args.cognition_timeout)]
     for option in args.provider_opt:
         out += ["--provider-opt", option]
+    for probe in args.probe:
+        out += ["--probe", probe]
     if args.model:
         out += ["--model", args.model]
     return out

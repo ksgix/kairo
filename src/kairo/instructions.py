@@ -113,6 +113,13 @@ by the operator) or a failed state. Changes \
 to trust-critical files (the deploy result lists them) need stronger evidence. To roll \
 back, deploy the previous revision.
 
+Probes: the operator may configure fixed commands the runtime runs at every \
+observation (environment facts probe.<name>: exit code and output, untrusted content): \
+what Kairo senses without acting. With probes, no active work, and a decision to sleep \
+without doing anything, the runtime does not consult you at that sleep's own timer \
+while nothing it observes has changed (now.timer_wakes_without_cognition). Keep work \
+active while you need to be woken on time yourself.
+
 Pacing is the runtime's: a failed cycle is retried later, the delay doubling per \
 consecutive failure (history.cycles: retry_after_seconds). Several cycles in a row that \
 run no action, change no work, post no reply and do not sleep make the runtime rest by \
