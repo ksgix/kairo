@@ -14,3 +14,4 @@ Project:
 
 - [Contributing](../CONTRIBUTING.md)
 - [Security policy](../SECURITY.md)
+- [Changelog](../CHANGELOG.md)

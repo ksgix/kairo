@@ -14,6 +14,7 @@ orchestrator, a task manager or a project manager.
 - [Operator interface](docs/operator.md): talking to a running Kairo
 - [Dashboard](docs/dashboard.md): the browser interface
 - [All docs](docs/README.md)
+- [Changelog](CHANGELOG.md): notable changes
 
 ## Running (development)
 
