@@ -1,7 +1,7 @@
 # The Kairo dashboard under systemd: a browser interface to the running Kairo.
 #
 # A template like kairo.service: @KAIRO_USER@ is filled in at install time
-# (README, "Dashboard"). The dashboard must run as the account Kairo runs as:
+# (docs/dashboard.md). The dashboard must run as the account Kairo runs as:
 # Kairo's socket is that account's only (mode 0600), and the socket is the
 # dashboard's only way to Kairo.
 #

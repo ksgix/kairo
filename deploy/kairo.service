@@ -1,14 +1,14 @@
 # Kairo Runtime under systemd: the external supervisor for self-deployment.
 #
 # deploy/kairo.service in the repository is a template. Two values are filled in
-# once, at install time (README, "Install on a host", renders them with sed):
+# once, at install time (docs/self-maintenance.md, "Install on a host", renders them with sed):
 #   service user:   @KAIRO_USER@   (the account Kairo runs as; its Claude CLI
 #                                   login is Kairo's cognition)
 #   its home:       @KAIRO_HOME@
 # An unrendered template never runs: no account has the placeholder's name, so
 # the service fails to start (status 217/USER).
 #
-# Layout (see README, "Self-maintenance"):
+# Layout (see docs/self-maintenance.md):
 #   /var/lib/kairo/kairo.db        the one authoritative database (locked by the runtime)
 #   /var/lib/kairo/dev             development worktree Kairo edits and commits in
 #   /var/lib/kairo/deploy          releases/<sha>, current, previous, snapshots/
