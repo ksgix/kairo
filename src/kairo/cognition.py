@@ -28,7 +28,7 @@ from kairo.actions import Action
 from kairo.redact import protect_env, protect_files, redact
 from kairo.chat import Message
 from kairo.directives import Directive
-from kairo.work import MAX_EVIDENCE, MAX_REQUESTS, WorkState
+from kairo.work import MAX_CHECK_ARGV, MAX_EVIDENCE, MAX_REQUESTS, WorkState
 
 
 @dataclass(frozen=True)
@@ -279,6 +279,9 @@ WORK_FIELDS = {
     "update": {"op", "work_id", "understanding", "strategy", "next_step"},
     "set_state": {"op", "work_id", "state", "reason", "wait_seconds", "evidence"},
 }
+# Optional per request kind. create "check": an argv the runtime itself runs when
+# completion of that work is requested (validated by kairo.work.WorkLedger).
+WORK_OPTIONAL = {"create": {"check"}, "update": set(), "set_state": set()}
 # Fields that may be null, per request kind (all other string fields must be strings).
 WORK_NULLABLE = {"create": {"directive_id"},
                  "update": {"understanding", "strategy", "next_step"},
@@ -327,7 +330,9 @@ def decision_schema(available_actions: dict[str, dict[str, Any]]) -> dict[str, A
 def _work_variants() -> list[dict[str, Any]]:
     props = {
         "create": {"op": {"const": "create"}, "ref": _STR, "objective": _STR, "why": _STR,
-                   "directive_id": _OPT_STR, "strategy": _STR, "next_step": _STR},
+                   "directive_id": _OPT_STR, "strategy": _STR, "next_step": _STR,
+                   "check": {"type": ["array", "null"], "items": _STR, "minItems": 1,
+                             "maxItems": MAX_CHECK_ARGV}},
         "update": {"op": {"const": "update"}, "work_id": _STR, "understanding": _OPT_STR,
                    "strategy": _OPT_STR, "next_step": _OPT_STR},
         "set_state": {"op": {"const": "set_state"}, "work_id": _STR,
@@ -354,11 +359,18 @@ def _parse_work(requests: Any) -> list[dict[str, Any]]:
     for i, r in enumerate(requests):
         if not isinstance(r, dict) or r.get("op") not in WORK_FIELDS:
             raise invalid(f"work request {i} must be an object with op create/update/set_state")
-        if r.keys() != WORK_FIELDS[r["op"]]:
+        optional = WORK_OPTIONAL[r["op"]]
+        if not WORK_FIELDS[r["op"]] <= r.keys() or r.keys() - WORK_FIELDS[r["op"]] - optional:
             raise invalid(f"work request {i} ({r['op']}) must have exactly the fields "
-                          f"{sorted(WORK_FIELDS[r['op']])}")
+                          f"{sorted(WORK_FIELDS[r['op']])}"
+                          + (f" (optionally {sorted(optional)})" if optional else ""))
+        check = r.get("check")
+        if check is not None and not (isinstance(check, list) and check
+                                      and all(isinstance(a, str) for a in check)):
+            raise invalid(f"work request {i}: 'check' must be a non-empty list of strings "
+                          "or null")
         for key, value in r.items():
-            if key in ("op", "evidence", "wait_seconds"):
+            if key in ("op", "evidence", "wait_seconds", "check"):
                 continue
             nullable = key in WORK_NULLABLE[r["op"]]
             if not (isinstance(value, str) or (nullable and value is None)):

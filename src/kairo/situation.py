@@ -549,6 +549,8 @@ def _work(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             "recent_changes": [{**_when(h.get("at"), now), **{k: v for k, v in h.items() if k != "at"}}
                                for h in (w.get("history") or [])[-limits.work_history:]],
         }
+        if w.get("check"):  # fixed at creation; the runtime runs it at completion
+            item["completion_check"] = w.get("check")
         text = w.get("understanding")
         if isinstance(text, str) and len(text) > allowed.get(id(w), 0):
             item["understanding_shortened"] = {"shown_chars": allowed.get(id(w), 0),
@@ -568,7 +570,8 @@ def _work(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         if w.get("state") == "completed":
             basis = w.get("completion_basis")
             # Only the runtime's own values are shown; anything else is unknown.
-            item["completion_basis"] = basis if basis in ("verified", "unverified") else "unknown"
+            item["completion_basis"] = basis if basis in ("verified", "checked", "unverified") \
+                else "unknown"
             item["evidence"] = w.get("evidence")
         return item
 

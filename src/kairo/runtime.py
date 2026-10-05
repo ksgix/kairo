@@ -865,9 +865,11 @@ class Runtime:
 
         # Work requests first: new work can then be linked by this decision's
         # actions, and a completion can only cite results cognition has seen.
-        work = self.work.apply(decision.work)
+        # A completion of work that has a check runs that check now, as an attempt
+        # at the work like any other, before the completion is accepted.
+        steps: list[Step] = []
+        work = self.work.apply(decision.work, run_check=lambda w: self._run_check(w, steps))
         rejected = list(work.rejected)
-        steps = []
         for action in decision.actions:
             if self._stop_requested:  # stopping: take on no new work
                 break
@@ -908,6 +910,19 @@ class Runtime:
         sleep_reason = (redact(decision.reason or "cognition chose to sleep", limit=1000)
                         if decision.sleep else None)
         return steps, decision.reason, summary, sleep_reason, decision.wake_after
+
+    def _run_check(self, work: Any, steps: list[Step]) -> dict[str, Any]:
+        """Run a work item's completion check: the command fixed when the work was
+        created, executed by the runtime itself (cognition only asked for the
+        completion). It is recorded as an attempt at that work."""
+        step = self.act(Action("process.run", {"argv": list(work.check)}, work_id=work.id,
+                               reason="completion check, fixed when this work was created "
+                                      "(run by the runtime)"))
+        steps.append(step)
+        record = self.memory.get("action", step.action.id) or {}
+        return {"action_id": step.action.id, "state": action_state(record),
+                "returncode": (step.result.output or {}).get("returncode")
+                if isinstance(step.result.output, dict) else None}
 
     def _resume_key(self, action: Action, work_id: str | None) -> str:
         """The operation key an action resuming ``action.resumes`` inherits. Only the

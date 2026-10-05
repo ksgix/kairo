@@ -439,7 +439,7 @@
     const closedRow = (w) => el("tr", null,
       el("td", null, stateBadge(w.state)), el("td", null, interp(w.objective)),
       el("td", null,
-        w.completion_basis ? badge(`basis: ${w.completion_basis}`, w.completion_basis === "verified" ? "ok" : "warn") : "",
+        w.completion_basis ? badge(`basis: ${w.completion_basis}`, ["verified", "checked"].includes(w.completion_basis) ? "ok" : "warn") : "",
         Array.isArray(w.evidence) ? el("div", {class: "muted"},
           `evidence: ${w.evidence.map((e) => `${short(e.action_id)} (${e.state})`).join(", ")}`) : ""),
       el("td", null, w.reason ? interp(w.reason) : "—"),

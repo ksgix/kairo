@@ -25,7 +25,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Callable
 
 from kairo.actions import FAILED, action_state, attempt_identity
 from kairo.memory import Collection, Memory, from_record
@@ -70,6 +70,8 @@ HISTORY = 40           # change-log entries kept per work item
 STRATEGY_LOG = 10      # strategy revisions remembered per work item
 STRATEGY_TEXT = 500    # characters of each remembered strategy
 ATTEMPT_SCAN = 200     # linked actions examined (recovery facts, repetition)
+MAX_CHECK_ARGV = 32    # arguments of a completion check
+MAX_CHECK_ARG = 500    # characters of each
 
 # A completion must cite at least one recorded action that succeeded (this work's
 # own attempt or any other): verified by a runtime verifier, or, where no verifier
@@ -80,7 +82,11 @@ EVIDENCE_STATES = frozenset({"verified_successful", "executed_unverified"})
 # cognition. "verified": at least one cited attempt was verified successful.
 # "unverified": the runtime could not check the outcome; the completion is
 # cognition's judgment, resting on attempts that ran and exited 0.
-VERIFIED, UNVERIFIED = "verified", "unverified"
+# "checked": the work's own completion check passed. The check is a command
+# cognition fixed when it created the work, before attempting it; the runtime ran
+# it itself when completion was requested, and it exited 0. Stronger than
+# cognition's judgment afterwards, weaker than an independent verifier.
+VERIFIED, CHECKED, UNVERIFIED = "verified", "checked", "unverified"
 
 
 @dataclass(frozen=True)
@@ -111,6 +117,10 @@ class Work:
     understanding_at: float | None = None
     # The last STRATEGY_LOG strategies: {"revision", "text", "since"}.
     strategy_log: list[dict[str, Any]] = field(default_factory=list)
+    # Completion check: an argv fixed at creation and never changed afterwards.
+    # The runtime runs it when completion is requested; the work completes only
+    # if it exits 0. None: no check (completion then rests on cited evidence).
+    check: list[str] | None = None
 
 
 # Fields whose bad values the work code and the situation already treat as unknown
@@ -181,16 +191,21 @@ class WorkLedger(Collection[Work]):
 
     # -- applying cognition's requests ----------------------------------------
 
-    def apply(self, requests: list[dict[str, Any]], now: float | None = None) -> WorkOutcome:
+    def apply(self, requests: list[dict[str, Any]], now: float | None = None,
+              run_check: Callable[[Work], dict[str, Any]] | None = None) -> WorkOutcome:
         """Validate and apply each request in order. A rejected request changes
-        nothing and does not stop the others."""
+        nothing and does not stop the others.
+
+        ``run_check`` runs a work item's completion check and returns the attempt
+        it made: {"action_id", "state", "returncode"}. The ledger never runs
+        anything itself; without a runner, work that has a check cannot complete."""
         now = time.time() if now is None else now
         outcome = WorkOutcome()
         for request in requests:
             try:
                 if not isinstance(request, dict):
                     raise WorkError("a work request must be an object")
-                applied = self._apply_one(request, outcome.refs, now)
+                applied = self._apply_one(request, outcome.refs, now, run_check)
             except Exception as exc:  # malformed input is a rejection, never a crash
                 reason = str(exc) if isinstance(exc, WorkError) else \
                     f"malformed request ({type(exc).__name__})"
@@ -202,7 +217,8 @@ class WorkLedger(Collection[Work]):
                 outcome.applied.append(applied)
         return outcome
 
-    def _apply_one(self, req: dict[str, Any], refs: dict[str, str], now: float) -> dict[str, Any]:
+    def _apply_one(self, req: dict[str, Any], refs: dict[str, str], now: float,
+                   run_check: Callable[[Work], dict[str, Any]] | None = None) -> dict[str, Any]:
         op = req.get("op")
         if op == "create":
             return self._create(req, refs, now)
@@ -210,7 +226,7 @@ class WorkLedger(Collection[Work]):
         if op == "update":
             return self._update(work, req, now)
         if op == "set_state":
-            return self._set_state(work, req, now)
+            return self._set_state(work, req, now, run_check)
         raise WorkError(f"unknown work request {op!r}")
 
     def _create(self, req: dict[str, Any], refs: dict[str, str], now: float) -> dict[str, Any]:
@@ -231,6 +247,7 @@ class WorkLedger(Collection[Work]):
             if _normalise(other.objective) == wanted:
                 raise WorkError(f"open work {other.id} already has this objective")
         work = Work(
+            check=_check(req.get("check")),
             objective=objective, why=_text(req, "why", required=True), directive_id=directive_id,
             strategy=_text(req, "strategy"), next_step=_text(req, "next_step"),
             created_at=now, updated_at=now, state_since=now,
@@ -240,7 +257,8 @@ class WorkLedger(Collection[Work]):
             {"revision": 1, "text": work.strategy[:STRATEGY_TEXT], "since": now}])
         self.save(_clean(work))
         refs[ref] = work.id
-        return {"op": "create", "ref": ref, "work_id": work.id}
+        return {"op": "create", "ref": ref, "work_id": work.id,
+                **({"check": True} if work.check else {})}
 
     def _update(self, work: Work, req: dict[str, Any], now: float) -> dict[str, Any]:
         changes: dict[str, Any] = {}
@@ -269,7 +287,8 @@ class WorkLedger(Collection[Work]):
         self._save(work, changes, events, now)
         return {"op": "update", "work_id": work.id, "changed": sorted(changes)}
 
-    def _set_state(self, work: Work, req: dict[str, Any], now: float) -> dict[str, Any]:
+    def _set_state(self, work: Work, req: dict[str, Any], now: float,
+                   run_check: Callable[[Work], dict[str, Any]] | None = None) -> dict[str, Any]:
         try:
             target = WorkState(req.get("state"))
         except ValueError:
@@ -288,14 +307,36 @@ class WorkLedger(Collection[Work]):
                 raise WorkError(f"wait_seconds must be in (0, {MAX_WAIT}]")
             changes["waiting_until"] = now + wait
         if target is WorkState.COMPLETED:  # evidence on any other change is ignored
-            evidence = self._evidence(work, req.get("evidence") or [])
+            evidence_ids = req.get("evidence") or []
+            # With a check, cited evidence is optional: the check is the evidence.
+            evidence = self._evidence(work, evidence_ids) if evidence_ids or not work.check \
+                else []
+            basis = UNVERIFIED
+            if work.check:
+                evidence.append(self._checked(work, run_check))
+                basis = CHECKED
             changes["evidence"] = evidence
             changes["completion_basis"] = (
                 VERIFIED if any(e["state"] == "verified_successful" for e in evidence)
-                else UNVERIFIED)
+                else basis)
         self._save(work, changes, [{"at": now, "event": "state_changed", "from": current,
                                     "to": target, "reason": reason[:200]}], now)
         return {"op": "set_state", "work_id": work.id, "from": current, "to": target}
+
+    def _checked(self, work: Work,
+                 runner: Callable[[Work], dict[str, Any]] | None) -> dict[str, Any]:
+        """Run the work's completion check (through the runtime) and return it as
+        evidence, or refuse the completion if it did not pass."""
+        if runner is None:
+            raise WorkError("this work has a completion check, and nothing here can run it")
+        ran = runner(work)
+        state, code = ran.get("state"), ran.get("returncode")
+        if state not in EVIDENCE_STATES or not (
+                isinstance(code, int) and not isinstance(code, bool) and code == 0):
+            raise WorkError(f"completion check {ran.get('action_id')} did not pass ({state}, "
+                            f"exit {code}): the work is not complete")
+        return {"action_id": ran.get("action_id"), "state": state, "returncode": code,
+                "check": True, "own_attempt": True}
 
     def _evidence(self, work: Work, ids: list[str]) -> list[dict[str, Any]]:
         """Completion must rest on finished actions that actually ran: this work's
@@ -381,6 +422,18 @@ def _text(req: dict[str, Any], name: str, required: bool = False) -> str:
     if len(value) > TEXT_LIMITS[name]:
         raise WorkError(f"{name!r} is longer than {TEXT_LIMITS[name]} characters")
     return value.strip()
+
+
+def _check(value: Any) -> list[str] | None:
+    """A completion check as requested at creation: an argv, or None."""
+    if value is None:
+        return None
+    if (not isinstance(value, list) or not 1 <= len(value) <= MAX_CHECK_ARGV
+            or not all(isinstance(a, str) and len(a) <= MAX_CHECK_ARG for a in value)
+            or not value[0].strip()):
+        raise WorkError(f"'check' must be a command: 1-{MAX_CHECK_ARGV} strings of at most "
+                        f"{MAX_CHECK_ARG} characters, the first naming a program")
+    return list(value)
 
 
 def _clean(work: Work) -> Work:
