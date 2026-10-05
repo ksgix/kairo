@@ -8,7 +8,24 @@ version = "0.1.0"
 description = "Kairo: a persistent autonomous runtime in which cognition operates."
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "MIT" }
+keywords = ["autonomous", "agent", "runtime", "llm", "claude", "self-maintenance"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ksgix/kairo"
+Repository = "https://github.com/ksgix/kairo"
 
 [project.scripts]
 kairo = "kairo.__main__:main"
