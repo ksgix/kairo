@@ -353,6 +353,7 @@ class LockTest(unittest.TestCase):
         proc = subprocess.Popen(kairo_cmd("--run", "--db", str(self.db), "--socket",
                                           str(self.dir / "k.sock"), "--reassess", "0"),
                                 env=_env(PACKAGE.parent), stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.stderr.close)  # registered first, so it runs after kill/wait
         self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
         deadline = time.monotonic() + 15
         while not (self.dir / "k.sock").exists():
