@@ -25,14 +25,15 @@ Run the suite the way CI does ([.github/workflows/tests.yml](.github/workflows/t
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-To run a single module, keep using discover:
+To run a single module, use discover with a pattern or the dotted module name:
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_deploy.py'
+PYTHONPATH=src python3 -m unittest tests.test_deploy
 ```
 
-Some test modules import helpers from sibling test modules, so the dotted form
-(`python3 -m unittest tests.test_deploy`) fails at import time. The tests need no network,
+Test modules share helpers by importing sibling modules; `tests/__init__.py` puts
+`tests/` on `sys.path` so both forms work. The tests need no network,
 credentials or third-party packages. If a change needs one of those, say so in the pull request.
 
 ## Making changes
