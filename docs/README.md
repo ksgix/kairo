@@ -9,3 +9,8 @@ Historical design reviews:
 
 - [Phase 10 architecture review](phase-10-architecture-review.md)
 - [Phase 10b architecture review](phase-10b-architecture-review.md)
+
+Project:
+
+- [Contributing](../CONTRIBUTING.md)
+- [Security policy](../SECURITY.md)

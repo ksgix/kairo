@@ -59,6 +59,11 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 The tests need no network, credentials or third-party packages.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
