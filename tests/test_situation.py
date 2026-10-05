@@ -296,10 +296,15 @@ class ReviewRegressionTest(SituationCase):
                                     recent_actions=new_actions, runtime={"now": 3000.0}),
                             Limits(budget=42_000))  # 10B's notes take ~1.5k of the fixed part
         self.assertGreater(s["context"]["trimmed_for_budget"], 0)
+        # The oldest go first, across kinds, but each kind keeps its newest
+        # history_keep items: the operator's latest messages are never all lost
+        # to newer action output.
+        chat = [m["text"][:5] for m in s["history"]["chat"]["items"]]
+        self.assertEqual(chat, [f"msg{i}" for i in range(15, 20)])
         kept = [a["id"] for a in s["history"]["actions"]["items"]]
-        self.assertEqual(kept, [f"a{i}" for i in range(15)])  # newer than every message
-        self.assertLess(len(s["history"]["chat"]["items"]), 20)
-        self.assertEqual(s["history"]["chat"]["items"][-1]["text"][:5], "msg19")
+        self.assertEqual(kept, [f"a{i}" for i in range(15 - len(kept), 15)])  # newest kept
+        self.assertGreaterEqual(len(kept), Limits().history_keep)
+        self.assertLessEqual(len(render_situation(s)), 42_000 + 2_000)  # + the context section
 
     def test_partial_identity_record_does_not_stop_kairo(self):
         rt = self.runtime(cognition=Recorder())

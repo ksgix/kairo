@@ -45,6 +45,26 @@ credentials or third-party packages. If a change needs one of those, say so in t
 - Write commit messages as a short imperative summary line (for example "Add CI workflow
   running the unittest suite"), with more detail in the body if it helps.
 
+## Developing with Claude Code
+
+`scripts/setup-claude-code.sh` writes this checkout's Claude Code permissions to `.claude/settings.local.json`. The file is machine-specific and ignored by git. Run the script as the account that runs Claude Code, then restart Claude Code from the project root. It preserves unrelated settings, refuses existing rules that would defeat the model (such as `Bash(*)` or a `sudo` wildcard), and `--dry-run` shows the changes without writing.
+
+- **Mode:** `dontAsk`. Anything not allowed is denied without waiting for a person.
+- **Allowed:**
+  - reading and editing project files;
+  - the read-only commands Claude Code vets itself (`git status`/`diff`/`log`, `ls`, …);
+  - `git add`, `commit`, `rm`, `mv`, `switch -c` and `tag -a`;
+  - `git fetch origin`, `git pull --ff-only origin main` and `git push origin main`;
+  - `scripts/test.sh`;
+  - `status`, `is-active` and `restart` of `kairo` and `kairo-dashboard`.
+- **Denied:**
+  - edits to `.claude/`, `.git/`, the bootstrap script and `~/.claude` (the policy cannot rewrite itself);
+  - the credential files;
+  - any other `sudo` or `systemctl` action;
+  - interpreters and package managers with free arguments;
+  - any other git network operation.
+- **Not a sandbox:** the tests run project code, which Claude Code can edit, as the same account, so editing plus testing amounts to running any code that account can run. The rules bound what Claude Code does directly; isolation from the host needs an OS boundary, such as Claude Code's sandbox (which needs `bubblewrap` and `socat`) or a separate account without sudo.
+
 ## Kairo maintains itself
 
 Kairo can edit, test and commit its own code in a development repository, and it deploys a

@@ -11,7 +11,7 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
 | `chat [--limit N] [--after SEQ]` | `chat` | the conversation, human messages and Kairo's replies, in order, with sequence numbers |
 | `message TEXT [--id ID]` | `message` | a human message: persisted, then Kairo wakes. The answer comes later, in `chat` |
 | `directives` | `directives` | all directives, active and inactive, with origin and history |
-| `directive add STATEMENT` | `directive.add` | a new lasting area of responsibility |
+| `directive add STATEMENT --description TEXT` | `directive.add` | a new lasting area of responsibility: the purpose and what it covers |
 | `directive deactivate ID` / `directive activate ID` | `directive.deactivate` / `directive.activate` | stop, or resume, pursuing a directive |
 | `wake [REASON]` | `wake` | reassess now. Not "do X" |
 | `stop` | `stop` | stop the runtime gracefully; the stop reason is recorded |
@@ -32,6 +32,7 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
   - Directives are never edited or deleted, only deactivated and activated again, so Work linked to one keeps its meaning.
   - Each records `origin: "operator"` and a history (`created`, `deactivated`, `activated`, with time and origin).
   - A statement is 1–500 characters, and an active duplicate (same words, any case or spacing) is refused.
+  - A description (required, 1–4,000 characters) says what the purpose covers: intent, scope, expectations, boundaries. Kairo decides the concrete work itself. Directives created before descriptions existed show none.
 - **Evidence.**
   - Messages, directives and their history are persisted records.
   - Wakes appear as the lifecycle and cycle wake reason.

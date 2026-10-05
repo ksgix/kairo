@@ -727,7 +727,8 @@ class RuntimeValidationTest(WorkCase):
             "absurd wait": (set_state(self.wid, "waiting", wait_seconds=-5), "wait_seconds"),
             "duplicate objective": (create("dup", "  primary   OBJECTIVE "), "already has this objective"),
             "missing directive": (create("d", "New thing", directive_id="nope"), "no active directive"),
-            "oversized": (update(self.wid, understanding="u" * 5000), "longer than"),
+            "oversized": (update(self.wid, understanding="u" * (TEXT_LIMITS["understanding"] + 1)),
+                          "longer than"),
             "noop update": (update(self.wid), "changes nothing"),
         }
         for label, (request, expected) in cases.items():

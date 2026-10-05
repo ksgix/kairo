@@ -9,7 +9,8 @@ newline, reads one JSON object terminated by a newline, and the connection close
     {"op": "message", "text": "...", "id": "..."}     a human message (id optional:
                                                       makes delivery idempotent)
     {"op": "directives"}                              all directives
-    {"op": "directive.add", "statement": "..."}       a new directive
+    {"op": "directive.add", "statement": "...",       a new directive: its purpose and
+     "description": "..."}                            what it is meant to cover
     {"op": "directive.deactivate", "id": "..."}       stop pursuing a directive
     {"op": "directive.activate", "id": "..."}         pursue it again
     {"op": "wake", "reason": "..."}                   reassess now (reason optional)
@@ -70,7 +71,8 @@ WAKE_REASON = 300
 OPS: dict[str, frozenset[str]] = {
     "status": frozenset(), "situation": frozenset(), "chat": frozenset({"limit", "after"}),
     "message": frozenset({"text", "id"}), "directives": frozenset(),
-    "directive.add": frozenset({"statement"}), "directive.deactivate": frozenset({"id"}),
+    "directive.add": frozenset({"statement", "description"}),
+    "directive.deactivate": frozenset({"id"}),
     "directive.activate": frozenset({"id"}), "wake": frozenset({"reason"}),
     "stop": frozenset(),
 }
@@ -259,10 +261,11 @@ class IPCServer:
             case "directives":
                 return runtime.directive_list()
             case "directive.add":
-                statement = request.get("statement")
-                if not isinstance(statement, str):
-                    raise IPCError("'directive.add' requires string 'statement'")
-                return {"directive": _view(runtime.add_directive(statement)),
+                statement, description = request.get("statement"), request.get("description")
+                if not isinstance(statement, str) or not isinstance(description, str):
+                    raise IPCError("'directive.add' requires string 'statement' and "
+                                   "string 'description'")
+                return {"directive": _view(runtime.add_directive(statement, description)),
                         "state": runtime.state}
             case "directive.deactivate" | "directive.activate":
                 directive_id = request.get("id")
@@ -348,7 +351,10 @@ def main(argv: list[str] | None = None) -> int:
     ops.add_parser("directives", help="list directives")
     directive = ops.add_parser("directive", help="add, deactivate or activate a directive")
     change = directive.add_subparsers(dest="change", required=True)
-    change.add_parser("add", help="add a lasting area of responsibility").add_argument("statement")
+    add = change.add_parser("add", help="add a lasting area of responsibility")
+    add.add_argument("statement", help="the purpose, concisely")
+    add.add_argument("--description", required=True,
+                     help="what it is meant to cover: intent, scope, expectations, boundaries")
     change.add_parser("deactivate", help="stop pursuing a directive").add_argument("id")
     change.add_parser("activate", help="pursue a directive again").add_argument("id")
     ops.add_parser("wake", help="ask Kairo to reassess now").add_argument(
@@ -368,8 +374,8 @@ def main(argv: list[str] | None = None) -> int:
                 payload["id"] = args.id
         case "directive":
             payload["op"] = f"directive.{args.change}"
-            payload.update({"statement": args.statement} if args.change == "add"
-                           else {"id": args.id})
+            payload.update({"statement": args.statement, "description": args.description}
+                           if args.change == "add" else {"id": args.id})
         case "wake":
             payload["reason"] = args.reason
 
@@ -417,9 +423,13 @@ def _format_chat(result: dict[str, Any]) -> str:
 
 
 def _format_directives(result: dict[str, Any]) -> str:
-    lines = [f"{d.get('id')}  {'active  ' if d.get('active') else 'inactive'}  "
-             f"since {_when(d.get('created_at'))}  {d.get('statement')}"
-             for d in result.get("directives", [])]
+    lines = []
+    for d in result.get("directives", []):
+        lines.append(f"{d.get('id')}  {'active  ' if d.get('active') else 'inactive'}  "
+                     f"since {_when(d.get('created_at'))}  {d.get('statement')}")
+        description = d.get("description")
+        lines.append("    " + (str(description).replace("\n", "\n    ") if description
+                               else "(no description recorded)"))
     if result.get("omitted_older"):
         lines.insert(0, f"({result['omitted_older']} older directives not shown)")
     return "\n".join(lines) or "(no directives)"

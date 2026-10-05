@@ -52,7 +52,12 @@ summary { cursor: pointer; color: var(--muted); }
         border: 1px solid currentColor; white-space: nowrap; }
 .prov.fact { color: var(--fact); } .prov.interp { color: var(--interp); }
 .prov.untrusted { color: var(--untrusted); } .prov.operator { color: var(--operator); }
-.interp-text { border-left: 3px solid var(--interp); padding-left: 8px; }
+.interp-text { border-left: 3px solid var(--interp); padding-left: 8px; white-space: pre-wrap;
+               overflow-wrap: anywhere; }
+.description { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+.directive h2 { flex: 1 1 auto; }
+label { display: block; margin: 8px 0 2px; color: var(--muted); }
+.hint { margin: 0 0 4px; font-size: 12px; }
 .untrusted-box { border-left: 3px solid var(--untrusted); padding-left: 8px; }
 .notice { margin: 12px 16px 0; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--warn);
           color: var(--warn); background: var(--panel); }

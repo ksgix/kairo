@@ -57,7 +57,9 @@ cd /opt/kairo
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-The tests need no network, credentials or third-party packages.
+The tests need no network, credentials or third-party packages. One dashboard test also runs the dashboard's own `app.js` in a minimal DOM (`tests/dashboard_dom.mjs`, not a browser) when `node` is installed, and is skipped otherwise.
+
+`scripts/test.sh` runs the same suite from any directory, or the named modules or tests (`scripts/test.sh test_work`).
 
 ## Contributing
 

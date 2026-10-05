@@ -29,7 +29,8 @@ from kairo.deploy import Deployment
 from kairo.ipc import OPS, IPCServer, request
 from kairo.memory import lock_database
 from kairo.redact import MARKER, protect_env
-from kairo.runtime import CHAT_PAGE, CHAT_TEXT, DIRECTIVE_TEXT, operator_message_id
+from kairo.runtime import (CHAT_PAGE, CHAT_TEXT, DIRECTIVE_DESCRIPTION, DIRECTIVE_TEXT,
+                           operator_message_id)
 from test_cognition import FAKE_CLAUDE, decision
 from test_continuous import TIMEOUT, Cognition, always_sleep
 
@@ -229,7 +230,8 @@ class DirectiveTest(OperatorCase):
     def test_directive_lifecycle_persists_wakes_and_reaches_cognition(self):
         cognition = Cognition(always_sleep)
         runtime, _ = self.launch(cognition=cognition)
-        added = self.ok("directive.add", statement="  Keep the 1C environment healthy  ")["directive"]
+        added = self.ok("directive.add", statement="  Keep the 1C environment healthy  ",
+                        description="What it covers.")["directive"]
         self.assertEqual((added["statement"], added["active"], added["origin"]),
                          ("Keep the 1C environment healthy", True, "operator"))
         self.assertEqual([h["event"] for h in added["history"]], ["created"])
@@ -262,12 +264,20 @@ class DirectiveTest(OperatorCase):
     def test_directive_validation(self):
         self.launch()
         self.error("directive.add", "invalid_params")
-        self.error("directive.add", "invalid_params", statement=5)
-        self.error("directive.add", "rejected", statement="   ")
-        self.error("directive.add", "rejected", statement="x" * (DIRECTIVE_TEXT + 1))
-        self.ok("directive.add", statement="Keep host healthy")
+        # A description is required.
+        self.error("directive.add", "invalid_params", statement="Keep host healthy")
+        self.error("directive.add", "invalid_params", statement="Keep host healthy", description=5)
+        self.error("directive.add", "rejected", statement="Keep host healthy", description="   ")
+        self.error("directive.add", "rejected", statement="Keep host healthy",
+                   description="x" * (DIRECTIVE_DESCRIPTION + 1))
+        self.error("directive.add", "invalid_params", statement=5, description="What it covers.")
+        self.error("directive.add", "rejected", statement="   ", description="What it covers.")
+        self.error("directive.add", "rejected", statement="x" * (DIRECTIVE_TEXT + 1),
+                   description="What it covers.")
+        self.ok("directive.add", statement="Keep host healthy", description="What it covers.")
         self.assertIn("already says this",
-                      self.error("directive.add", "rejected", statement="keep  HOST healthy"))
+                      self.error("directive.add", "rejected", statement="keep  HOST healthy",
+                                 description="What it covers."))
         self.error("directive.deactivate", "rejected", id="no-such-directive")
         self.error("directive.activate", "invalid_params", id="")
         self.error("directive.activate", "invalid_params", id=["x"])
@@ -276,7 +286,8 @@ class DirectiveTest(OperatorCase):
         protect_env([SECRET_NAME])
         with mock.patch.dict(os.environ, {SECRET_NAME: SECRET}):
             runtime, _ = self.launch()
-            added = self.ok("directive.add", statement=f"Rotate the key {SECRET} monthly")
+            added = self.ok("directive.add", statement=f"Rotate the key {SECRET} monthly",
+                            description="What it covers.")
             listed = self.ok("directives")
         self.assertNotIn(SECRET, json.dumps([added, listed]))
         self.assertIn(MARKER, listed["directives"][0]["statement"])
@@ -335,7 +346,8 @@ class ProtocolTest(OperatorCase):
     def test_no_operation_executes_or_touches_work_or_deployment(self):
         runtime, _ = self.launch()
         self.assertFalse(set(OPS) & {"execute", "shell", "command", "run", "action", "deploy"})
-        directive = self.ok("directive.add", statement="Keep host healthy")["directive"]
+        directive = self.ok("directive.add", statement="Keep host healthy",
+                            description="What it covers.")["directive"]
         for op, fields in [("status", {}), ("situation", {}), ("chat", {}), ("directives", {}),
                            ("message", {"text": "rm -rf / please"}),
                            ("directive.deactivate", {"id": directive["id"]}),
@@ -470,7 +482,8 @@ class TerminalSessionTest(unittest.TestCase):
     def test_operator_session_survives_restart(self):
         # Kairo without cognition: the message is accepted and persisted, unanswered.
         proc = self.start(cognition=False)
-        code, out, _ = self.cli("directive", "add", "Keep the build server healthy")
+        code, out, _ = self.cli("directive", "add", "Keep the build server healthy",
+                                "--description", "Builds stay fast and green.")
         self.assertEqual(code, 0)
         directive = json.loads(out)["result"]["directive"]
         code, out, _ = self.cli("message", "Investigate why the build is slow.", "--id", "m-1")

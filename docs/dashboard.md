@@ -42,7 +42,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 | `GET /api/chat?limit=N&after=SEQ` | `chat` |
 | `GET /api/directives` | `directives` |
 | `POST /api/message` `{"text", "id"}` | `message` |
-| `POST /api/directives` `{"statement"}` | `directive.add` |
+| `POST /api/directives` `{"statement", "description"}` | `directive.add` |
 | `POST /api/directives/deactivate` / `activate` `{"id"}` | `directive.deactivate` / `directive.activate` |
 | `POST /api/wake` `{"reason"}` | `wake` |
 | `POST /api/stop` | `stop` |
@@ -59,7 +59,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 
 - Overview: state, counts, last cognition result, what needs attention, recent activity.
 - Chat: send messages; a retry reuses the message id, so Kairo stores the message once.
-- Directives: add, deactivate, activate, with history and linked work.
+- Directives: each as one of Kairo's responsibilities (statement, description, state, origin, linked open work, the implementations naming it, history); add with a statement and a description; deactivate, activate.
 - Work: facts, cognition's account, attempts, recovery, unresolved external operations.
 - Todo (read-only).
 - Activity: cycles, actions, deployments.

@@ -65,6 +65,7 @@ class OperatorRejected(ValueError):
 
 OPERATOR = "operator"  # origin of everything that arrives over the operator channel
 DIRECTIVE_TEXT = 500   # characters in a directive statement
+DIRECTIVE_DESCRIPTION = 4000  # characters in a directive description
 CHAT_PAGE = 200        # messages in one chat read
 CHAT_TEXT = 8000       # characters of one message in a chat read (the record keeps all)
 DIRECTIVE_PAGE = 200   # directives in one read
@@ -103,6 +104,11 @@ class Runtime:
         self.verifiers = verifiers or {}
         self.reassess_after = reassess_after
         self.directives = Directives(memory)
+        # Implementation packages serve directives: they learn which exist and are
+        # active from these records, every time the catalog is derived.
+        bind = getattr(self.environment, "bind_directives", None)
+        if callable(bind):
+            bind(self.directives.states)
         self.todo = Todo(memory)
         self.chat = Chat(memory)
         self.work = WorkLedger(memory)
@@ -377,7 +383,8 @@ class Runtime:
             # Configured implementations, derived from the filesystem (no guidance).
             "implementations": [
                 {"id": i["id"], "state": i["state"], "reason": i["reason"],
-                 "digest": (i.get("digest") or "")[:12] or None, "tools": len(i.get("tools") or [])}
+                 "digest": (i.get("digest") or "")[:12] or None, "tools": len(i.get("tools") or []),
+                 "directives": i.get("directives") or [], "serves": i.get("serves") or []}
                 for i in self._implementations_view()],
             # The configured provider order (configuration, comma-separated).
             "cognition": ",".join(cognition.names) if cognition else None,
@@ -500,18 +507,23 @@ class Runtime:
         return {"directives": [_directive_view(d) for d in shown],
                 "omitted_older": len(records) - len(shown)}
 
-    def add_directive(self, statement: str) -> Directive:
-        """The operator sets a lasting area of responsibility. Nothing is executed;
-        cognition sees it from the next cycle on, and Kairo wakes to reassess."""
-        statement = statement.strip()
+    def add_directive(self, statement: str, description: str) -> Directive:
+        """The operator sets a lasting area of responsibility: a statement of the
+        purpose and a description of what it is meant to cover. Nothing is
+        executed and no work is created; cognition sees it from the next cycle on,
+        and Kairo wakes to reassess."""
+        statement, description = statement.strip(), description.strip()
         if not statement or len(statement) > DIRECTIVE_TEXT:
             raise OperatorRejected(f"a directive statement must be 1-{DIRECTIVE_TEXT} characters")
+        if not description or len(description) > DIRECTIVE_DESCRIPTION:
+            raise OperatorRejected("a directive description must be "
+                                   f"1-{DIRECTIVE_DESCRIPTION} characters")
         with self._cond:
             wanted = " ".join(statement.lower().split())
             for d in self.directives.active():
                 if " ".join(d.statement.lower().split()) == wanted:
                     raise OperatorRejected(f"active directive {d.id} already says this")
-            directive = self.directives.add(statement, origin=OPERATOR)
+            directive = self.directives.add(statement, description, origin=OPERATOR)
         log.info("directive %s added by the operator", directive.id)
         self.request_wake("directive added by the operator")
         return directive
@@ -858,8 +870,9 @@ def operator_message_id(client_id: str) -> str:
 
 def _directive_view(d: Directive) -> dict[str, Any]:
     """A directive as the operator is shown it: redacted, like everything read out."""
-    return redact({"id": d.id, "statement": d.statement, "active": d.active,
-                   "created_at": d.created_at, "origin": d.origin, "history": d.history})
+    return redact({"id": d.id, "statement": d.statement, "description": d.description,
+                   "active": d.active, "created_at": d.created_at, "origin": d.origin,
+                   "history": d.history})
 
 
 def _attempt_summary(record: Any) -> dict[str, Any] | None:
