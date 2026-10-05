@@ -42,6 +42,23 @@ implementations and the situation model. Back to the [README](../README.md); see
 - **Stop:** `stop()`, SIGINT/SIGTERM or an IPC `stop` sets a flag. The loop takes on no new actions, finishes the current one, persists `stopped` and returns.
 - **Restart:** the same Kairo comes back, with the same identity, directives, work, chat and action log. It records whether the previous process stopped cleanly, and cognition sees that as the wake reason. Executed actions are never replayed. An action that was running when the process died is marked `interrupted`, not re-run; cognition sees it in `recent_actions` and decides what to do.
 
+### Pacing
+
+The runtime keeps a failing or spinning cognition from running hot. Both rules are facts about cycles; neither judges a decision.
+
+- **Failure backoff:** a cycle in which cognition failed is retried after a delay that doubles per consecutive failure (60 seconds up to 1 hour), whatever the default reassessment is. It is never retried at once, and never "sleep until woken". A usable decision resets it; any wake interrupts it.
+- **Stalled cycles:** a decided cycle that ran no action, applied no work request, posted no reply, and did not rest (it stayed awake, or asked to be woken in under 30 seconds) changes nothing. After 5 in a row the runtime rests by itself for 5 minutes (or the default reassessment, if longer). Cognition sees both in the cycle log (`retry_after_seconds`, `rested_by_runtime`).
+
+### Probes and quiet wakes
+
+A probe is a fixed command the operator configures (`--probe NAME=COMMAND`, at most 8, run directly without a shell, 10 seconds each). The runtime itself runs every probe at every observation; its exit code and what it printed (400 characters, redacted) become the observation `probe.NAME`. Probes are Kairo's senses: a change in the world shows up in the observation, and in "what changed since the previous observation", without any action. What a probe prints is untrusted content.
+
+- **Quiet wakes:** when probes are configured, no work is active, and cognition chose to sleep without doing anything, the runtime remembers what it observed (the observation with its probes, messages, directives, work, actions, implementations). At the sleep's own timer, if none of that has changed, it sleeps again for the same interval without consulting cognition.
+- Every other wake (a message, the operator, a directive, a work wait, a start) reaches cognition, and so does any observable change, or the timer once 6 hours have passed without a decision.
+- No cycle is recorded for a quiet wake. Cognition is told how many there were (`now.timer_wakes_without_cognition`); the operator sees `quiet_wakes` in status.
+- Without probes nothing changes: an unchanged observation of six host facts proves nothing, so cognition is consulted at every wake as before.
+- Choose probes that print stable state (`systemctl is-active nginx`, a health URL's status code), not ones that change every run (`date`, `uptime`).
+
 Without a cognition provider, Kairo observes, sleeps with the reason `no cognition provider configured`, and wakes (and sleeps again) on messages or its reassessment interval.
 
 ## Cognition (Claude)
@@ -73,7 +90,8 @@ The layers, from most lasting to most momentary:
 
   The runtime validates each against the stored work and applies it or rejects it. Rejections appear in the next situation. The runtime assigns every id and timestamp, and rejects unknown ids, illegal transitions, changes to closed work, duplicate objectives, unknown directives and oversized text. Text limits, in characters: objective 600, why 1,000, strategy 2,000, next step 1,000, reason 1,000, understanding 10,000. Longer text is rejected whole, never cut.
 - **Completion needs evidence:** ids of recorded actions that succeeded, meaning either verified successful or, where no verifier exists, run with exit code 0. A non-zero exit without verification never counts. Evidence may be the work's own attempts or any other action, linked to other work or to none. Each piece of evidence is recorded with its verification status, exit code and `own_attempt`. Evidence sent with any other state change is ignored, and the change is applied.
-- **Completion basis:** the runtime records it as `verified` (a verifier confirmed at least one cited attempt) or `unverified` (the runtime couldn't check the outcome; the completion is cognition's judgment of results that exited 0). Cognition can't set it. Records written before this field existed show `unknown`.
+- **Completion checks:** work can be created with a `check`: a command (an argv, run like `process.run`) that exits 0 only when the objective is achieved. It is fixed at creation and cannot be set or changed afterwards. When cognition asks to complete that work, the runtime runs the check itself, as an attempt at the work; the work completes only if it exits 0, and cited evidence becomes optional. A failed check refuses the completion and is a failed attempt like any other.
+- **Completion basis:** the runtime records it as `verified` (a verifier confirmed at least one cited attempt), `checked` (the work's own completion check passed: cognition committed to the test before attempting the work, and the runtime ran it) or `unverified` (the runtime couldn't check the outcome; the completion is cognition's judgment of results that exited 0). Cognition can't set it. Records written before this field existed show `unknown`.
 - **Retry versus new strategy:** changing the strategy gives it a new revision. The last 10 strategies are remembered, the first 500 characters of each. Each linked action records the revision it belongs to, so a retry (same revision) is distinguishable from a changed strategy.
 - **One source of truth:** each `work` record is the only authority for that item's current state, with a log of its last 40 changes. Attempts are not copied into it; they are the action records that point to the work.
 - **Understanding (up to 10,000 characters)** is cognition's current synthesis of the work: what the problem is, what has been found, which approaches were tried and why they failed, constraints, what remains uncertain. It is replaced as a whole on each update: one current state, not a log, a transcript or stored reasoning. It stays labelled as interpretation; the facts stay in the runtime's records. A longer update is rejected whole, never cut.

@@ -13,6 +13,9 @@ names the commit that introduced it.
 
 ### Added
 
+- Pacing: failure backoff for cognition errors and a rest after stalled cycles.
+- Operator probes (`--probe NAME=COMMAND`) and quiet timer wakes.
+- Completion checks for work, and the `checked` completion basis.
 - Initial runtime foundation (`cb247bb`).
 - Cognition integration (`d57efb8`) and cognition context (`18b18c0`).
 - Ongoing work carried across cycles (`1e8eb5e`).

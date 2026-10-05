@@ -40,6 +40,7 @@ python3 -m kairo --db var/kairo.db
 - The socket is created with mode `0600` and removed on shutdown. A stale socket left by a crashed process is replaced; a socket another live process is listening on is never touched.
 - The IPC protocol is one JSON object per line in each direction, one request per connection; see [Operator interface](docs/operator.md).
 - `--reassess` defaults to 300 seconds; `0` means sleep until woken. Memory defaults to `$KAIRO_DB` or `~/.local/share/kairo/kairo.db`.
+- `--probe NAME=COMMAND` (repeatable) gives Kairo senses: a fixed command the runtime runs at every observation, e.g. `--probe web='systemctl is-active nginx'`. With probes, an idle Kairo does not call the model at a timer wake when nothing changed; see [Probes and quiet wakes](docs/architecture.md#probes-and-quiet-wakes).
 - With `pip install -e .`, `kairo` replaces `python3 -m kairo`.
 
 ## Dashboard
