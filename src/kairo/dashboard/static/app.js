@@ -447,7 +447,7 @@
     out.push(card("Recently closed",
       closed.length ? el("div", {class: "scroll"}, el("table", null, el("tbody", null, closed.map(closedRow))))
                     : el("p", {class: "muted"}, "None."),
-      el("p", {class: "muted"}, work.completion_basis || "")));
+      el("p", {class: "muted"}, "Basis: verified means a runtime verifier confirmed a cited action; unverified means Kairo judged results that exited 0.")));
     return out;
   }
 

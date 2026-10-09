@@ -17,6 +17,7 @@ from unittest import mock
 from kairo import Action, Decision, Environment, Memory, Outcome, Runtime, State, Verification
 from kairo.cognition import Context
 from kairo.environment import ACTIONS
+from kairo.instructions import INSTRUCTIONS
 from kairo.redact import MARKER, secret_values
 from kairo.situation import LIMITS, Limits, build_situation, render_situation
 from test_continuous import SRC, TIMEOUT
@@ -66,7 +67,8 @@ class IdentityAndStateTest(SituationCase):
         kairo = situation_of(rt)["kairo"]
         self.assertEqual(kairo["identity"], rt.identity["id"])
         self.assertEqual(kairo["starts"], 1)
-        self.assertIn("persistent autonomous runtime", kairo["what"])
+        self.assertNotIn("what", kairo)  # explained once, in the instructions
+        self.assertIn("persistent autonomous runtime", INSTRUCTIONS)
         self.assertIn("age_seconds", kairo["born"])
 
     def test_runtime_state_and_cycles(self):
@@ -111,7 +113,8 @@ class DirectivesTest(SituationCase):
         self.assertNotIn("open_todo_items", active)
         self.assertIn("age_seconds", active["since"])
         self.assertEqual(d["inactive"], 1)
-        self.assertIn("not tasks", d["meaning"])
+        self.assertNotIn("meaning", d)
+        self.assertIn("not facts and not task lists", INSTRUCTIONS)
 
     def test_records_without_timestamps_are_unknown_not_invented(self):
         rt = self.runtime()
@@ -145,7 +148,7 @@ class HistoryTest(SituationCase):
         self.assertEqual({a["id"]: a["failure"] for a in threads["actions_failed"]},
                          {wrong.action.id: "verification_failed", broken.action.id: "not_found"})
         self.assertEqual(threads["actions_outcome_unknown"], [])
-        self.assertIn("not a task list", threads["meaning"])
+        self.assertIn("not a task list", threads["source"])
 
     def test_interrupted_action_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -410,6 +413,35 @@ class EnvironmentAndCapabilitiesTest(SituationCase):
         self.assertNotIn("verification", caps)
 
 
+class FixedTextTest(SituationCase):
+    """Explanations that never change are in the instructions, once; the situation
+    keeps only what varies and short provenance labels."""
+
+    def test_a_fresh_situation_stays_small(self):
+        rt = self.runtime()
+        rt.start()
+        text = render_situation(situation_of(rt))
+        self.assertLessEqual(len(text), 6000, "the fixed text of the situation grew back")
+
+    def test_no_constant_explanations_or_limits_dump(self):
+        rt = self.runtime()
+        rt.start()
+        s = situation_of(rt)
+        self.assertNotIn("limits", s["context"])
+        self.assertNotIn("times", s["context"])
+        for section in (s["directives"], s["work"], s["open_threads"], s["capabilities"],
+                        s["environment"]):
+            self.assertFalse({"meaning", "scope", "completion_basis", "work_requests",
+                              "external_effects", "verification"} & set(section))
+            self.assertIn("source", section)
+        self.assertIn("interpretation", s["work"]["note"])
+        self.assertIn("untrusted", s["history"]["actions"]["note"])
+        for explained in ("age_seconds is relative to now.time", "awaiting_confirmation",
+                          "outcome_unknown", "set_state", "evidence", "operation_key",
+                          "operator_selected"):
+            self.assertIn(explained, INSTRUCTIONS)
+
+
 class NoKnowledgeSectionTest(unittest.TestCase):
     def test_there_is_no_empty_knowledge_section(self):
         s = build_situation(Context(environment={}, directives=[], messages=[],
@@ -443,7 +475,7 @@ class BoundsTest(SituationCase):
         rt.start()
         for i in range(8):
             run_action(rt, [sys.executable, "-c", f"print('{i}' * 5000)"])
-        limits = Limits(budget=12_000)
+        limits = Limits(budget=8_000)  # the eight actions alone render to about 11,000
         s = build_situation(rt.context(), limits)
         self.assertGreater(s["context"]["trimmed_for_budget"], 0)
         self.assertLess(len(render_situation(s)), limits.budget + 2000)  # + the context section

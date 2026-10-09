@@ -18,6 +18,7 @@ from unittest import mock
 from kairo import Action, Decision, Memory, Outcome, Runtime, State, Verification
 from kairo.cognition import CognitionError, decision_schema, parse_decision
 from kairo.environment import ACTIONS
+from kairo.instructions import INSTRUCTIONS
 from kairo.redact import MARKER
 from kairo.situation import build_situation, render_situation
 from kairo.work import HISTORY, MAX_OPEN, MAX_REQUESTS, TEXT_LIMITS
@@ -684,9 +685,8 @@ class CompletionBasisTest(WorkCase):
         basis = {w["objective"]: w["completion_basis"] for w in s["work"]["recently_closed"]}
         self.assertEqual(basis, {"Verified objective": "verified",
                                  "Unverified objective": "unverified"})
-        legend = s["work"]["completion_basis"]
-        self.assertIn("did not independently verify", legend)
-        self.assertIn("cognition's judgment", legend)
+        self.assertNotIn("completion_basis", s["work"])  # the legend is in the instructions
+        self.assertIn("unverified (your judgment of results, never proof)", INSTRUCTIONS)
 
     def test_l_basis_survives_restart_in_a_new_process(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -845,9 +845,8 @@ class RuntimeValidationTest(WorkCase):
 class CapabilitiesTest(WorkCase):
     def test_work_interface_is_advertised_as_a_capability(self):
         s = build_situation(self.runtime().context())
-        text = s["capabilities"]["work_requests"]
         for op in ("create", "update", "set_state", "evidence"):
-            self.assertIn(op, text)
+            self.assertIn(op, INSTRUCTIONS)  # explained once, not in every situation
         self.assertEqual(s["work"]["open"], [])
         self.assertIn("interpretation", s["work"]["note"])
 

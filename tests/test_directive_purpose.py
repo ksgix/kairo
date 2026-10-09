@@ -14,7 +14,7 @@ from pathlib import Path
 
 from kairo import Environment
 from kairo.implementations import Implementations
-from kairo.instructions import cognition_request
+from kairo.instructions import INSTRUCTIONS, cognition_request
 from kairo.ipc import OPS
 from kairo.runtime import DIRECTIVE_DESCRIPTION, OperatorRejected
 from kairo.situation import LIMITS, build_situation
@@ -94,9 +94,8 @@ class DirectiveInContextTest(WorkCase):
         self.assertEqual(item["id"], d.id)
         self.assertEqual(item["description"], d.description)  # whole, not cut at 2,000
         self.assertGreater(len(item["description"]), LIMITS.text)
-        note = s["directives"]["note"]
-        self.assertIn("operator's words", note)
-        self.assertIn("not a list of tasks", note)
+        self.assertIn("Directives are the operator's words", INSTRUCTIONS)
+        self.assertIn("not facts and not task lists", INSTRUCTIONS)
         self.assertEqual(s["directives"]["source"], "runtime records, set by the operator")
 
 

@@ -57,6 +57,11 @@ names the commit that introduced it.
   when true, and drops the `capabilities.verification` paragraph. In production 98 of
   99 actions were "unverifiable", so the label said nothing the action's `state` did not.
   Stored records, action states and `completion_basis` are unchanged.
+- Fixed explanations (each section's `meaning` and `note`, the action-state legend,
+  `capabilities.work_requests`, `external_effects`, `kairo.what`, `environment.scope`)
+  moved from every situation into the instructions, once and shorter; sections keep a
+  short `source` and provenance labels. `context.limits` is gone. A fresh situation is
+  about 3,500 characters instead of 10,500.
 
 ### Removed
 

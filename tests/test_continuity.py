@@ -95,8 +95,8 @@ class CognitionSeesTheUnderstandingTest(WorkCase):
         s = build_situation(rt.context())
         note = s["work"]["note"]
         self.assertIn("understanding", note)
-        self.assertIn("cognition's own earlier words (interpretation)", note)
-        self.assertIn("current synthesis", note)
+        self.assertIn("your earlier words (interpretation)", note)
+        self.assertIn("current synthesis", INSTRUCTIONS)
         [item] = s["work"]["open"]
         # The runtime's facts about the work never carry cognition's words.
         self.assertNotIn("<label:", json.dumps(item["recovery"]))
