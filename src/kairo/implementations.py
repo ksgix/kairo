@@ -16,14 +16,6 @@ Three authorities, never merged:
 
 The manifest declares what a package offers and needs; it grants nothing. The
 runtime decides whether a package's tools become executable actions.
-
-A package serves a purpose: its manifest names the directive(s) it supports
-(``directives``: directive ids). Directives are Kairo's lasting purposes; an
-implementation is capability available in pursuit of them, never a purpose or an
-agent of its own. A package is available only while at least one directive it
-names exists and is active, and none it names is unknown; otherwise it is
-``unassociated``. Directive states come from the runtime's records (bound by the
-runtime); without them, no association can be confirmed.
 """
 
 from __future__ import annotations
@@ -35,7 +27,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from kairo.redact import env_owner, protect_env
 
@@ -46,7 +38,6 @@ MANIFEST = "implementation.json"
 ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")            # no dot, slash, space, underscore
 TOOL = re.compile(r"^[a-z][a-z0-9_]{0,39}$")          # no dot, slash, space, hyphen
 ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-DIRECTIVE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")  # a directive record id
 COMMAND = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")  # a bare command looked up on PATH
 KIND = re.compile(r"^impl\.[a-z][a-z0-9-]{0,39}\.[a-z][a-z0-9_]{0,39}$")
 PREFIX = "impl."
@@ -54,7 +45,6 @@ CHECK = "check"           # reserved tool name: the action that runs declared ch
 MAX_KIND = 90
 MAX_TOOLS = 32
 MAX_CHECKS = 16
-MAX_DIRECTIVES = 16       # directives one package may name
 MAX_ARGV = 32
 MAX_ARG = 500
 MAX_TIMEOUT = 3600.0
@@ -65,7 +55,7 @@ SKIP_DIRS = {".git", "__pycache__"}
 SKIP_SUFFIXES = (".pyc",)
 
 MANIFEST_FIELDS = {"kairo_implementation", "id", "description", "version", "guidance",
-                   "requires", "env", "tools", "checks", "directives"}
+                   "requires", "env", "tools", "checks"}
 TOOL_FIELDS = {"name", "description", "run", "params", "timeout", "verify", "effects",
                "idempotency"}
 # What a tool declares about effects outside this host (optional; undeclared
@@ -186,7 +176,6 @@ class Package:
     tools: tuple[Operation, ...]
     checks: tuple[Operation, ...]
     digest: str
-    directives: tuple[str, ...] = ()     # ids of the directives this package supports
 
     @property
     def secrets(self) -> list[str]:
@@ -252,11 +241,6 @@ def load_package(path: Path) -> Package:
             raise ImplementationError(f"env {name!r} must be {{\"secret\": true|false}}")
         declared[name] = spec["secret"]
 
-    directives = _list(data, "directives", MAX_DIRECTIVES)
-    if not all(isinstance(d, str) and DIRECTIVE_ID.match(d) for d in directives) \
-            or len(set(directives)) != len(directives):
-        raise ImplementationError("directives must be a list of distinct directive ids")
-
     tools = tuple(_operation(path, t, TOOL_FIELDS, "tool") for t in _list(data, "tools", MAX_TOOLS))
     checks = tuple(_operation(path, c, CHECK_FIELDS, "check") for c in _list(data, "checks", MAX_CHECKS))
     for group, label in ((tools, "tool"), (checks, "check")):
@@ -266,7 +250,7 @@ def load_package(path: Path) -> Package:
     if any(t.name == CHECK for t in tools):
         raise ImplementationError(f"tool name {CHECK!r} is reserved for checks")
     package = Package(pid, path, description, version, guidance, tuple(commands), declared,
-                      tools, checks, content_digest(path), tuple(directives))
+                      tools, checks, content_digest(path))
     for kind in package.kinds():  # every generated action kind must itself be valid
         action_kind(*kind[len(PREFIX):].split(".", 1))
     return package
@@ -402,46 +386,25 @@ class Entry:
     """One implementation as the runtime sees it now. Derived, never stored."""
 
     id: str
-    # available | disabled | unassociated | unmet_requirements | broken | missing
-    state: str
+    state: str                    # available | disabled | unmet_requirements | broken | missing
     reason: str | None = None
     package: Package | None = None
-    # The active directives this package currently serves (empty unless associated).
-    serves: tuple[str, ...] = ()
 
 
 class Implementations:
     """Reads the implementations directory and the operator's enablement, and
     says what is usable right now. Holds no state of its own."""
 
-    def __init__(self, directory: str | Path | None, enabled: str | set[str] | frozenset[str] = frozenset(),
-                 directives: Callable[[], dict[str, bool]] | None = None) -> None:
+    def __init__(self, directory: str | Path | None, enabled: str | set[str] | frozenset[str] = frozenset()) -> None:
         self.directory = Path(directory) if directory is not None else None
         self.enabled = enabled if enabled == "all" else frozenset(enabled)  # type: ignore[arg-type]
-        # Directive id -> active, read from the runtime's records on every catalog.
-        self.directives = directives
         self.catalog()  # declare credentials before any action can run
 
     def _is_enabled(self, pid: str) -> bool:
         return self.enabled == "all" or pid in self.enabled
 
-    def _association(self, package: Package,
-                     states: dict[str, bool] | None) -> tuple[tuple[str, ...], str | None]:
-        """(the active directives the package serves, or why it serves none)."""
-        if not package.directives:
-            return (), "names no directive"
-        if states is None:
-            return (), "directive records are not available to check its directives"
-        if unknown := [d for d in package.directives if d not in states]:
-            return (), f"names unknown directives: {unknown}"
-        active = tuple(d for d in package.directives if states[d])
-        if not active:
-            return (), f"its directives are all inactive: {list(package.directives)}"
-        return active, None
-
     def catalog(self) -> list[Entry]:
         entries: dict[str, Entry] = {}
-        states = self.directives() if self.directives is not None else None
         names = sorted(p.name for p in self.directory.iterdir() if p.is_dir()) \
             if self.directory is not None and self.directory.is_dir() else []
         for name in names:
@@ -460,19 +423,15 @@ class Implementations:
                 continue
             if not self._is_enabled(package.id):
                 entries[name] = Entry(package.id, "disabled", None, package)
-                continue
-            serves, unserved = self._association(package, states)
-            if unserved:
-                entries[name] = Entry(package.id, "unassociated", unserved, package)
             elif missing := [c for c in package.commands if shutil.which(c) is None]:
                 entries[name] = Entry(package.id, "unmet_requirements",
-                                      f"missing commands: {missing}", package, serves)
+                                      f"missing commands: {missing}", package)
             elif absent := [n for n in package.secrets if not os.environ.get(n)]:
                 # Names only: a credential's value is never shown anywhere.
                 entries[name] = Entry(package.id, "unmet_requirements",
-                                      f"missing secrets: {absent}", package, serves)
+                                      f"missing secrets: {absent}", package)
             else:
-                entries[name] = Entry(package.id, "available", None, package, serves)
+                entries[name] = Entry(package.id, "available", None, package)
         if self.enabled != "all":
             for pid in sorted(self.enabled - set(entries)):
                 entries[pid] = Entry(pid, "missing", "enabled but not found")
@@ -529,8 +488,7 @@ class Implementations:
             if entry.package is not None:
                 p = entry.package
                 item.update(description=p.description, version=p.version, digest=p.digest,
-                            tools=[t.name for t in p.tools], checks=[c.name for c in p.checks],
-                            directives=list(p.directives), serves=list(entry.serves))
+                            tools=[t.name for t in p.tools], checks=[c.name for c in p.checks])
                 if entry.state == "available" and p.guidance is not None:
                     try:
                         item["guidance"] = p.guidance.read_text(errors="replace")[:GUIDANCE_READ]

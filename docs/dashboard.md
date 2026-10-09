@@ -59,7 +59,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 
 - Overview: state, counts, last cognition result, what needs attention, recent activity.
 - Chat: send messages; a retry reuses the message id, so Kairo stores the message once.
-- Directives: each as one of Kairo's responsibilities (statement, description, state, origin, linked open work, the implementations naming it, history); add with a statement and a description; deactivate, activate.
+- Directives: each as one of Kairo's responsibilities (statement, description, state, origin, linked open work, history); add with a statement and a description; deactivate, activate.
 - Work: facts, cognition's account, attempts, recovery, unresolved external operations.
 - Activity: cycles, actions, deployments.
 - Context: the situation, section by section, as cognition sees it.

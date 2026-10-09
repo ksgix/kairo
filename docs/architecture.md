@@ -127,13 +127,9 @@ An implementation is a local package that gives Kairo capability in a domain: gu
 
 - **Manifest (JSON):**
   - required: `"kairo_implementation": 1`, `id`, `description`;
-  - optional: `version` (a label only), `guidance`, `requires.commands`, `env` (names, each `{"secret": bool}`), `tools`, `checks`, `directives`.
+  - optional: `version` (a label only), `guidance`, `requires.commands`, `env` (names, each `{"secret": bool}`), `tools`, `checks`.
   - Unknown fields are rejected. Every path must stay inside the package, including through symlinks. The manifest declares what a package offers and needs; it grants nothing.
-- **Enablement** is configuration: `--implementations onec,web`, or `all` (default `none`), plus `--implementations-dir`. The catalog is derived from disk each time (`available`, `disabled`, `unassociated`, `unmet_requirements`, `broken`, `missing`). There is no registry.
-- **A package serves directives.** Its manifest names them: `"directives": ["<directive id>", ...]` (at most 16, distinct). Directive = why Kairo acts; implementation = capability available in pursuit of it, never a purpose or an agent.
-  - A package is `available` only while at least one directive it names exists and is active, and none it names is unknown. Otherwise it is `unassociated` (naming none, naming an unknown id, or all of its directives inactive): its tools are not offered and a request for them is refused before anything runs.
-  - The directive states come from the runtime's own directive records, read each time the catalog is derived; there is no second registry. Serving a directive does not enable a package, and enablement and requirements still apply.
-  - Cognition is shown only the packages serving an active directive (each with `serves`), and each active directive lists them; a broken package is listed with its fault only, and the rest are counted (`not_shown`), never described.
+- **Enablement** is configuration: `--implementations onec,web`, or `all` (default `none`), plus `--implementations-dir`. The catalog is derived from disk each time (`available`, `disabled`, `unmet_requirements`, `broken`, `missing`). There is no registry. A package is `available` when it is enabled and its requirements are met; it is not tied to any directive, so it can be written in advance and moved between hosts.
 - **Tools are ordinary actions.** Each tool becomes `impl.<id>.<tool>`, and declared checks become `impl.<id>.check` (with `{"name": ...}`). They're listed only while the package is available, and pass through the same parsing, repetition rule, execution, verification and logging as every other action.
   - **Parameters:** validated against a strict JSON Schema subset (an object of string, integer, number, boolean or string-array properties, enums, `required`, `additionalProperties: false`), then passed as JSON on stdin, never on the command line.
   - **Execution:** from the package directory, with no shell, a timeout, and capped, redacted output.
@@ -203,7 +199,7 @@ A tool that acts on another system declares it. Undeclared tools keep the plain 
 | `kairo` | Identity, when Kairo was first created, how many times it has started, and (with deployment configured) `code`: the running release and recent deployments |
 | `now` | Time, lifecycle state, wake reason, current process, the previous process (and whether it ended cleanly), the previous cycle |
 | `environment` | A fresh host observation and what changed since the previous one |
-| `directives` | Active directives: statement and description (the operator's words), age and the implementations serving each, plus the number inactive |
+| `directives` | Active directives: statement and description (the operator's words), and age, plus the number inactive |
 | `work` | Open work, each with its understanding, its recent attempts by strategy revision and recent changes, plus recently closed work with reason or evidence |
 | `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …) and output, and chat |
 | `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, elapsed work waits |

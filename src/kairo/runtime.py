@@ -103,11 +103,6 @@ class Runtime:
         self.verifiers = verifiers or {}
         self.reassess_after = reassess_after
         self.directives = Directives(memory)
-        # Implementation packages serve directives: they learn which exist and are
-        # active from these records, every time the catalog is derived.
-        bind = getattr(self.environment, "bind_directives", None)
-        if callable(bind):
-            bind(self.directives.states)
         self.chat = Chat(memory)
         self.work = WorkLedger(memory)
         self.state = State.CREATED
@@ -380,8 +375,7 @@ class Runtime:
             # Configured implementations, derived from the filesystem (no guidance).
             "implementations": [
                 {"id": i["id"], "state": i["state"], "reason": i["reason"],
-                 "digest": (i.get("digest") or "")[:12] or None, "tools": len(i.get("tools") or []),
-                 "directives": i.get("directives") or [], "serves": i.get("serves") or []}
+                 "digest": (i.get("digest") or "")[:12] or None, "tools": len(i.get("tools") or [])}
                 for i in self._implementations_view()],
             # The configured provider order (configuration, comma-separated).
             "cognition": ",".join(cognition.names) if cognition else None,

@@ -731,12 +731,9 @@ class ImplementationMaintenanceTest(unittest.TestCase):
             (pkg / "run.sh").chmod(0o755)
             (pkg / "implementation.json").write_text(json.dumps({
                 "kairo_implementation": 1, "id": "tool-pkg", "description": "d",
-                "directives": ["d-maintain"],
                 "tools": [{"name": "go", "description": "run it", "run": ["./run.sh"]}]}))
             deployment = FakeDeployment(release_dir(Path(tmp) / "releases", "a" * 40))
             runtime = Runtime(Memory(), Environment(Implementations(impls, "all"), deployment))
-            runtime.directives.save(Directive("Maintain tools", id="d-maintain",
-                                              description="Keep the tool package working."))
             first = runtime.act(Action("impl.tool-pkg.go"))
             (pkg / "run.sh").write_text("#!/bin/sh\necho v2\n")  # maintained in place
             second = runtime.act(Action("impl.tool-pkg.go"))

@@ -53,15 +53,6 @@ class Directives(Collection[Directive]):
                                    description=description,
                                    history=[{"at": now, "event": "created", "by": origin}]))
 
-    def states(self) -> dict[str, bool]:
-        """Every directive id with whether it is active, read tolerantly: a
-        corrupt record is left out (it can then never count as active)."""
-        states = {}
-        for data in self._memory.all("directive"):
-            if isinstance(data, dict) and isinstance(data.get("id"), str):
-                states[data["id"]] = data.get("active") is True
-        return states
-
     def set_active(self, id: str, active: bool, by: str | None = None) -> Directive:
         directive = self.get(id)
         if directive is None:

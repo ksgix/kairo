@@ -322,9 +322,6 @@
     for (const w of ((S.situation || {}).work || {}).open || []) {
       if (w.directive_id) (linked[w.directive_id] = linked[w.directive_id] || []).push(w);
     }
-    // Which implementation packages name each directive (the operator's view of the
-    // catalog, from status): serving it now, or naming it without serving.
-    const impls = ((S.status || {}).implementations || []);
     const statement = field("input", "directive", {placeholder: "The purpose, concisely, e.g. “Keep the backups verified and restorable”", maxlength: 500, required: true});
     const description = field("textarea", "directive-description", {placeholder: "What this purpose covers: its intent, scope, expectations and boundaries. Kairo decides the concrete work itself.", maxlength: 4000, rows: 5, required: true});
     const note = el("p", {class: "muted"});
@@ -358,7 +355,6 @@
         if (!r.ok) alert(`Refused: ${r.error} (${r.code})`);
         await loadDirectives(); render();
       }}, d.active ? "Deactivate" : "Activate");
-      const named = impls.filter((i) => (i.directives || []).includes(d.id));
       const work = linked[d.id] || [];
       out.push(el("section", {class: "card directive"},
         el("div", {class: "row"},
@@ -368,15 +364,9 @@
           ? el("p", {class: "description"}, d.description)
           : el("p", {class: "muted"}, "No description recorded (created before directives had descriptions)."),
         el("p", {class: "muted"}, `${d.origin ? "set by " + d.origin : "origin not recorded"} · created ${epoch(d.created_at)} · ${short(d.id)}`),
-        el("div", {class: "grid"},
-          el("div", null, sub("Open work for it"), prov("fact"),
-            work.length ? el("ul", null, work.map((w) => el("li", null, stateBadge(w.state), " ", el("span", {class: "interp-text"}, w.objective))))
-              : el("p", {class: "muted"}, d.active ? "None right now: Kairo decides what, if anything, is worth pursuing." : "None.")),
-          el("div", null, sub("Implementations"), prov("fact"),
-            named.length ? el("ul", null, named.map((i) => el("li", null, i.id, " ",
-              (i.serves || []).includes(d.id) ? badge(i.state, i.state === "available" ? "ok" : "warn") : badge(i.state || "not serving", ""),
-              i.reason ? el("span", {class: "muted"}, ` ${i.reason}`) : null)))
-              : el("p", {class: "muted"}, "No implementation package names this directive."))),
+        el("div", null, sub("Open work for it"), prov("fact"),
+          work.length ? el("ul", null, work.map((w) => el("li", null, stateBadge(w.state), " ", el("span", {class: "interp-text"}, w.objective))))
+            : el("p", {class: "muted"}, d.active ? "None right now: Kairo decides what, if anything, is worth pursuing." : "None.")),
         el("details", null, el("summary", null, `History (${(d.history || []).length})`),
           el("ul", null, (d.history || []).map((h) => el("li", {class: "muted"}, `${h.event} · ${epoch(h.at)}${h.by ? " · " + h.by : ""}`))))));
     }

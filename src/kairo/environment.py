@@ -77,13 +77,6 @@ class Environment:
             return core
         return {**core, **impls.actions(core)}
 
-    def bind_directives(self, states: Any) -> None:
-        """Where implementation packages learn which directives exist and are
-        active: the runtime's own directive records (``states()`` -> {id: active})."""
-        impls = getattr(self, "implementations", None)
-        if impls is not None:
-            impls.directives = states
-
     def code_facts(self) -> dict[str, Any]:
         deployment = getattr(self, "deployment", None)
         return deployment.facts() if deployment is not None else {}

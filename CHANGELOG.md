@@ -49,6 +49,12 @@ names the commit that introduced it.
   read. The operator protocol stays version 2; its `status` result no longer has the
   `open_todo` field.
 - The empty `knowledge` situation section and `Context.knowledge`: nothing ever filled it.
+- Directive-bound implementation packages: the manifest field `directives`, the
+  `unassociated` state, and `serves` / per-directive `implementations` in the situation,
+  the status and the dashboard. Directive ids are random per installation, so a package
+  naming them could not be written in advance or moved between hosts. A package is
+  available again when it is enabled and its requirements are met; a manifest that
+  still names `directives` is refused as an unknown field.
 
 ### Fixed
 
