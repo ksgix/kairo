@@ -38,6 +38,9 @@ names the commit that introduced it.
 
 ### Changed
 
+- Instructions: act at the scale a request asks for, do not ask for permission that is
+  not needed, keep real care for what cannot be undone, and report honestly what was
+  and was not done.
 - Repository prepared for public release (`eac74bc`).
 - Project metadata completed: license, keywords, classifiers, URLs (`3952f0d`).
 - README restructured into a landing page; architecture, self-maintenance, operator

@@ -114,6 +114,17 @@ The layers, from most lasting to most momentary:
 - **Waiting deadlines:** while sleeping, Kairo also wakes at the earliest future `waiting_until` of any open work, with the wake reason `wait elapsed for work <id>`. The work stays `waiting` until cognition decides otherwise.
 - **Provider failures** are cycle-level. They are never attributed to a work item, and they leave work and its failure history untouched.
 
+### How cognition is told to act
+
+The instructions set the default posture, and it was changed after the 72-hour run, in which a request to make the dashboard "look more professional" produced a stylesheet edit reported as done.
+
+- **Scale:** what the operator asks for, or a directive covers, is reason enough to act, at the scale it was asked. A request to redesign or rework something is not met by a small adjustment.
+- **No needless permission:** cognition tests whether something is possible with a harmless check instead of waiting for the operator, and asks only when the check cannot settle it.
+- **Care where it matters:** what can be undone (edits under version control, restarting Kairo's own services, a deployment that can be rolled back) needs testing, not hesitation. Real care is reserved for what cannot be undone or reaches outside the host: deleting data, external operations, anything touching credentials.
+- **Honest reporting:** if cognition did less than was asked, or could not check the result itself (it cannot see how a page looks), it says so instead of calling the work done.
+
+These are instructions to a model, not rules the runtime enforces.
+
 ## Cognition providers
 
 Kairo's cognition layer (`Cognition`, in `cognition.py`) asks providers for each cycle's decision. Providers are adapters (`claude.py`, test fakes; later e.g. Gemini). They don't know about each other, about fallback, or about Kairo's state, and they have no tools, so a failed call can't have changed anything.
