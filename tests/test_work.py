@@ -21,7 +21,7 @@ from kairo.environment import ACTIONS
 from kairo.instructions import INSTRUCTIONS
 from kairo.redact import MARKER
 from kairo.situation import build_situation, render_situation
-from kairo.work import HISTORY, MAX_OPEN, MAX_REQUESTS, TEXT_LIMITS
+from kairo.work import HISTORY, MAX_OPEN, MAX_REQUESTS, STRATEGY_TEXT, TEXT_LIMITS
 from test_continuous import SRC, TIMEOUT
 
 
@@ -506,6 +506,19 @@ class TextLimitsTest(WorkCase):
             self.assertIn(f"'{field}' is longer than {TEXT_LIMITS[field]}",
                           outcome.rejected[0]["reason"])
         self.assertEqual(rt.memory.all("work"), [])
+
+    def test_earlier_strategies_stay_readable(self):
+        self.assertEqual(STRATEGY_TEXT, 500)
+        rt = self.runtime()
+        first = "first approach: " + "a" * (TEXT_LIMITS["strategy"] - 16)
+        rt.work.apply([create("w", "long strategies", strategy=first)])
+        [record] = rt.memory.all("work")
+        rt.work.apply([update(record["id"], strategy="second approach")])
+        log = rt.memory.get("work", record["id"])["strategy_log"]
+        self.assertEqual(log[0]["text"], first[:STRATEGY_TEXT])
+        revisions = only_open(build_situation(rt.context()))["recovery"]["revisions"]
+        self.assertEqual({r["revision"]: r["strategy"] for r in revisions},
+                         {2: "second approach", 1: first[:STRATEGY_TEXT]})
 
     def test_a_long_lived_item_keeps_its_creation_in_history(self):
         rt = self.runtime()

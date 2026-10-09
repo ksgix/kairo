@@ -68,7 +68,7 @@ MAX_EVIDENCE = 10      # action ids cited for a completion
 MAX_WAIT = 30 * 86400  # longest wait_seconds accepted
 HISTORY = 40           # change-log entries kept per work item
 STRATEGY_LOG = 10      # strategy revisions remembered per work item
-STRATEGY_TEXT = 200    # characters of each remembered strategy
+STRATEGY_TEXT = 500    # characters of each remembered strategy
 ATTEMPT_SCAN = 200     # linked actions examined (recovery facts, repetition)
 
 # A completion must cite at least one recorded action that succeeded (this work's
