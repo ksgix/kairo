@@ -60,13 +60,13 @@ TRANSITIONS: dict[WorkState, frozenset[WorkState]] = {
 # current synthesis (what is known, tried, failed and why, constraints, open
 # questions), rewritten as a whole when it changes: room for a long-lived problem,
 # not a log. The situation bounds the total shown across open work.
-TEXT_LIMITS = {"objective": 300, "why": 500, "strategy": 600, "understanding": 10_000,
-               "next_step": 300, "reason": 500, "ref": 40}
+TEXT_LIMITS = {"objective": 600, "why": 1000, "strategy": 2000, "understanding": 10_000,
+               "next_step": 1000, "reason": 1000, "ref": 40}
 MAX_REQUESTS = 10      # work requests per decision
 MAX_OPEN = 25          # open work items at once
 MAX_EVIDENCE = 10      # action ids cited for a completion
 MAX_WAIT = 30 * 86400  # longest wait_seconds accepted
-HISTORY = 12           # change-log entries kept per work item
+HISTORY = 40           # change-log entries kept per work item
 STRATEGY_LOG = 10      # strategy revisions remembered per work item
 STRATEGY_TEXT = 200    # characters of each remembered strategy
 ATTEMPT_SCAN = 200     # linked actions examined (evidence, recovery facts, repetition)

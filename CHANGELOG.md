@@ -40,6 +40,9 @@ names the commit that introduced it.
 - README restructured into a landing page; architecture, self-maintenance, operator
   and dashboard documentation moved into `docs/` (`297853b`).
 - `tests` is now a package, so the suite also runs by dotted module name (`b9ab067`).
+- Work text limits raised: objective 600, why 1,000, strategy 2,000, next step 1,000 and
+  reason 1,000 characters (understanding stays 10,000). Longer text is still rejected
+  whole. Each work item keeps its last 40 changes instead of 12.
 
 ### Removed
 

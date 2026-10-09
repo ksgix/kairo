@@ -20,7 +20,7 @@ from kairo.cognition import CognitionError, decision_schema, parse_decision
 from kairo.environment import ACTIONS
 from kairo.redact import MARKER
 from kairo.situation import build_situation, render_situation
-from kairo.work import MAX_OPEN, MAX_REQUESTS, TEXT_LIMITS
+from kairo.work import HISTORY, MAX_OPEN, MAX_REQUESTS, TEXT_LIMITS
 from test_continuous import SRC, TIMEOUT
 
 
@@ -469,6 +469,52 @@ class SecurityTest(WorkCase):
         outcome = rt.work.apply([create("w", "x" * (TEXT_LIMITS["objective"] + 1))])
         self.assertIn("longer than", outcome.rejected[0]["reason"])
         self.assertEqual(rt.memory.all("work"), [])
+
+
+class TextLimitsTest(WorkCase):
+    """Production lost cycles to length rejections; the limits are generous now,
+    still rejected (never truncated) beyond them, and shown whole to cognition."""
+
+    def test_limits(self):
+        self.assertEqual({k: TEXT_LIMITS[k] for k in ("objective", "why", "strategy", "next_step",
+                                                      "reason", "understanding")},
+                         {"objective": 600, "why": 1000, "strategy": 2000, "next_step": 1000,
+                          "reason": 1000, "understanding": 10_000})
+        self.assertEqual(HISTORY, 40)
+
+    def test_texts_at_the_limits_are_kept_and_shown_whole(self):
+        rt = self.runtime()
+        full = {"objective": "o" * TEXT_LIMITS["objective"], "why": "w" * TEXT_LIMITS["why"],
+                "strategy": "s" * TEXT_LIMITS["strategy"],
+                "next_step": "n" * TEXT_LIMITS["next_step"]}
+        outcome = rt.work.apply([create("w", full["objective"], why=full["why"],
+                                        strategy=full["strategy"], next_step=full["next_step"])])
+        self.assertEqual(outcome.rejected, [])
+        [record] = rt.memory.all("work")
+        rt.work.apply([set_state(record["id"], "waiting", reason="r" * TEXT_LIMITS["reason"])])
+        item = only_open(build_situation(rt.context()))
+        self.assertEqual((item["objective"], item["why"], item["strategy"]["text"],
+                          item["next_step"]),
+                         (full["objective"], full["why"], full["strategy"], full["next_step"]))
+        self.assertEqual(item["state_reason"], "r" * TEXT_LIMITS["reason"])
+
+    def test_one_character_over_is_rejected_whole(self):
+        rt = self.runtime()
+        for field in ("why", "strategy", "next_step"):
+            outcome = rt.work.apply([create("w", "fine", **{field: "x" * (TEXT_LIMITS[field] + 1)})])
+            self.assertIn(f"'{field}' is longer than {TEXT_LIMITS[field]}",
+                          outcome.rejected[0]["reason"])
+        self.assertEqual(rt.memory.all("work"), [])
+
+    def test_a_long_lived_item_keeps_its_creation_in_history(self):
+        rt = self.runtime()
+        rt.work.apply([create("w", "long-lived")])
+        [record] = rt.memory.all("work")
+        for i in range(15):  # 30 events, more than the 12 kept before
+            rt.work.apply([update(record["id"], understanding=f"u{i}", next_step=f"n{i}")])
+        history = rt.memory.get("work", record["id"])["history"]
+        self.assertEqual(history[0]["event"], "created")
+        self.assertEqual(len(history), 31)
 
 
 # -- Q: decision validation -------------------------------------------------------------

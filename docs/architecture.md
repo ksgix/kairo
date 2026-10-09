@@ -71,11 +71,11 @@ The layers, from most lasting to most momentary:
   - `update` of understanding, next step or strategy;
   - `set_state`.
 
-  The runtime validates each against the stored work and applies it or rejects it. Rejections appear in the next situation. The runtime assigns every id and timestamp, and rejects unknown ids, illegal transitions, changes to closed work, duplicate objectives, unknown directives and oversized text.
+  The runtime validates each against the stored work and applies it or rejects it. Rejections appear in the next situation. The runtime assigns every id and timestamp, and rejects unknown ids, illegal transitions, changes to closed work, duplicate objectives, unknown directives and oversized text. Text limits, in characters: objective 600, why 1,000, strategy 2,000, next step 1,000, reason 1,000, understanding 10,000. Longer text is rejected whole, never cut.
 - **Completion needs evidence:** ids of the work's own attempts that succeeded. That means either verified successful, or, where no verifier exists, run with exit code 0. A non-zero exit without verification never counts. Each piece of evidence is recorded with its verification status and exit code.
 - **Completion basis:** the runtime records it as `verified` (a verifier confirmed at least one cited attempt) or `unverified` (the runtime couldn't check the outcome; the completion is cognition's judgment of results that exited 0). Cognition can't set it. Records written before this field existed show `unknown`.
 - **Retry versus new strategy:** changing the strategy gives it a new revision. Each linked action records the revision it belongs to, so a retry (same revision) is distinguishable from a changed strategy.
-- **One source of truth:** each `work` record is the only authority for that item's current state, with a short log of its own changes. Attempts are not copied into it; they are the action records that point to the work.
+- **One source of truth:** each `work` record is the only authority for that item's current state, with a log of its last 40 changes. Attempts are not copied into it; they are the action records that point to the work.
 - **Understanding (up to 10,000 characters)** is cognition's current synthesis of the work: what the problem is, what has been found, which approaches were tried and why they failed, constraints, what remains uncertain. It is replaced as a whole on each update: one current state, not a log, a transcript or stored reasoning. It stays labelled as interpretation; the facts stay in the runtime's records. A longer update is rejected whole, never cut.
 
 ## Failure and recovery
