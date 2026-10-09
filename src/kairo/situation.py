@@ -682,7 +682,7 @@ def _capabilities(ctx: Context, limits: Limits = LIMITS) -> dict[str, Any]:
             "strategy (a changed strategy gets a new revision; attempts are grouped by it). "
             "set_state: active, waiting (reason is the condition; optional wait_seconds), "
             "blocked (reason is the obstacle), abandoned (reason), or completed (reason, plus "
-            "'evidence': ids of this work's attempts that achieved the outcome; each must be "
+            "'evidence': ids of actions that showed the outcome (any recorded action); each must be "
             "verified successful, or, unverified, have exited 0; the runtime records whether "
             "the completion is verified or unverified). "
             "Completed and abandoned work cannot change. Link each action to the work it is "

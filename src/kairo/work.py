@@ -69,10 +69,11 @@ MAX_WAIT = 30 * 86400  # longest wait_seconds accepted
 HISTORY = 40           # change-log entries kept per work item
 STRATEGY_LOG = 10      # strategy revisions remembered per work item
 STRATEGY_TEXT = 200    # characters of each remembered strategy
-ATTEMPT_SCAN = 200     # linked actions examined (evidence, recovery facts, repetition)
+ATTEMPT_SCAN = 200     # linked actions examined (recovery facts, repetition)
 
-# A completion must cite at least one of this work's attempts that succeeded:
-# verified by a runtime verifier, or, where no verifier exists, ran and exited 0.
+# A completion must cite at least one recorded action that succeeded (this work's
+# own attempt or any other): verified by a runtime verifier, or, where no verifier
+# exists, ran and exited 0. Each evidence entry records whether it is an own attempt.
 EVIDENCE_STATES = frozenset({"verified_successful", "executed_unverified"})
 
 # How a completion is grounded; always computed by the runtime, never taken from
@@ -286,32 +287,29 @@ class WorkLedger(Collection[Work]):
             if not 0 < wait <= MAX_WAIT:
                 raise WorkError(f"wait_seconds must be in (0, {MAX_WAIT}]")
             changes["waiting_until"] = now + wait
-        evidence_ids = req.get("evidence") or []
-        if target is WorkState.COMPLETED:
-            evidence = self._evidence(work, evidence_ids)
+        if target is WorkState.COMPLETED:  # evidence on any other change is ignored
+            evidence = self._evidence(work, req.get("evidence") or [])
             changes["evidence"] = evidence
             changes["completion_basis"] = (
                 VERIFIED if any(e["state"] == "verified_successful" for e in evidence)
                 else UNVERIFIED)
-        elif evidence_ids:
-            raise WorkError("evidence only applies to completion")
         self._save(work, changes, [{"at": now, "event": "state_changed", "from": current,
                                     "to": target, "reason": reason[:200]}], now)
         return {"op": "set_state", "work_id": work.id, "from": current, "to": target}
 
     def _evidence(self, work: Work, ids: list[str]) -> list[dict[str, Any]]:
-        """Completion must rest on this work's own attempts that actually ran."""
+        """Completion must rest on finished actions that actually ran: this work's
+        own attempts, or any other recorded action whose result shows the outcome."""
         if not ids:
-            raise WorkError("completion needs evidence: ids of this work's attempts that "
-                            "achieved the outcome")
+            raise WorkError("completion needs evidence: ids of actions that showed the "
+                            "outcome was achieved")
         if len(ids) > MAX_EVIDENCE:
             raise WorkError(f"at most {MAX_EVIDENCE} evidence ids")
-        linked = {a.get("id"): a for a in self.attempts(work.id, ATTEMPT_SCAN)}
         evidence = []
         for action_id in ids:
-            record = linked.get(action_id)
-            if record is None:
-                raise WorkError(f"action {action_id!r} is not an attempt at this work")
+            record = self._memory.get("action", action_id) if isinstance(action_id, str) else None
+            if not isinstance(record, dict):
+                raise WorkError(f"action {action_id!r} is not a recorded action")
             state = action_state(record)
             returncode = ((record.get("result") or {}).get("output") or {}).get("returncode")
             if state == "exited_nonzero":
@@ -326,7 +324,8 @@ class WorkLedger(Collection[Work]):
                     and returncode == 0):
                 raise WorkError(f"action {action_id} cannot be evidence: it exited "
                                 f"{returncode} and no verifier confirmed success")
-            evidence.append({"action_id": action_id, "state": state, "returncode": returncode})
+            evidence.append({"action_id": action_id, "state": state, "returncode": returncode,
+                             "own_attempt": record.get("work_id") == work.id})
         return evidence
 
     def unsettled_repeat(self, work_id: str, identity: str) -> dict[str, Any] | None:

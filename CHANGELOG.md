@@ -43,6 +43,10 @@ names the commit that introduced it.
 - Work text limits raised: objective 600, why 1,000, strategy 2,000, next step 1,000 and
   reason 1,000 characters (understanding stays 10,000). Longer text is still rejected
   whole. Each work item keeps its last 40 changes instead of 12.
+- Completion evidence may be any finished action that passes the existing state rules
+  (verified successful, or unverified with exit 0), not only the work's own attempts.
+  Each evidence entry records `own_attempt`. Evidence sent with a state change other
+  than completion is ignored instead of rejecting the change.
 
 ### Removed
 

@@ -81,8 +81,9 @@ failure that looks temporary; give wait_seconds and the runtime wakes Kairo when
 runs out. Use blocked only for a concrete obstacle you cannot get past now. \
 Actionable work stays active.
 - Complete work only when its outcome is actually achieved, citing as evidence \
-this work's attempts whose results show it. Evidence must be verified successful, or, \
-where the runtime has no verifier, an attempt that exited 0; a non-zero exit without \
+the actions whose results show it: this work's attempts or any other recorded action. \
+Evidence must be verified successful, or, where the runtime has no verifier, an action \
+that exited 0; a non-zero exit without \
 verification can never support completion. The runtime records the completion as \
 "verified" or "unverified". An unverified completion is only your own judgment of the \
 results, not verification: never treat it as proof. Abandon work, with a reason, when \

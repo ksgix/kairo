@@ -590,27 +590,64 @@ class CompletionBasisTest(WorkCase):
         self.assertIn("verified_failed", rejected["reason"])
         self.assertEqual(record["state"], "active")
 
-    def test_g_h_i_ownership_invention_and_closed_work(self):
+    def test_g_h_i_invention_and_closed_work(self):
         rt = self.runtime()
         rt.start()
         refs = rt.work.apply([create("a", "Work A"), create("b", "Work B")]).refs
         rt.act(run(["true"], work=refs["b"]))
         foreign = rt.work.attempts(refs["b"], 1)[0]["id"]
-        cases = {
-            "another work's attempt": [foreign],
-            "invented id": ["deadbeef" * 4],
-        }
-        for label, evidence in cases.items():
-            with self.subTest(label):
-                [r] = rt.work.apply([set_state(refs["a"], "completed", "done",
-                                               evidence=evidence)]).rejected
-                self.assertIn("not an attempt at this work", r["reason"])
+        [r] = rt.work.apply([set_state(refs["a"], "completed", "done",
+                                       evidence=["deadbeef" * 4])]).rejected
+        self.assertIn("not a recorded action", r["reason"])
         rt.work.apply([set_state(refs["b"], "completed", "done", evidence=[foreign])])
         closed = rt.work.apply([set_state(refs["b"], "completed", "again", evidence=[foreign]),
                                 update(refs["b"], understanding="rewrite history")]).rejected
         self.assertEqual(len(closed), 2)
         self.assertTrue(all("closed work does not change" in r["reason"] for r in closed))
         self.assertEqual(rt.work.get(refs["a"]).state, "active")
+
+    def test_any_finished_action_can_be_evidence_and_ownership_is_recorded(self):
+        rt = self.runtime()
+        rt.start()
+        refs = rt.work.apply([create("a", "Work A"), create("b", "Work B"),
+                              create("c", "Work C")]).refs
+        rt.act(run(["true"], work=refs["b"]))
+        foreign = rt.work.attempts(refs["b"], 1)[0]["id"]
+        unlinked = rt.act(run(["true"])).action.id
+        rt.act(run(["true"], work=refs["c"]))
+        own = rt.work.attempts(refs["c"], 1)[0]["id"]
+        outcome = rt.work.apply([set_state(refs["a"], "completed", "done",
+                                           evidence=[foreign, unlinked]),
+                                 set_state(refs["c"], "completed", "done", evidence=[own])])
+        self.assertEqual(outcome.rejected, [])
+        self.assertEqual([(e["action_id"], e["own_attempt"]) for e in rt.work.get(refs["a"]).evidence],
+                         [(foreign, False), (unlinked, False)])
+        self.assertEqual([(e["action_id"], e["own_attempt"]) for e in rt.work.get(refs["c"]).evidence],
+                         [(own, True)])
+        self.assertEqual(rt.work.get(refs["a"]).completion_basis, "unverified")
+
+    def test_other_evidence_still_needs_a_successful_run(self):
+        rt = self.runtime()
+        rt.start()
+        refs = rt.work.apply([create("a", "Work A")]).refs
+        failed = rt.act(run(["false"])).action.id            # exited_nonzero, unlinked
+        missing = rt.act(run(["/nonexistent/binary"])).action.id  # failed_to_execute
+        for action_id in (failed, missing):
+            with self.subTest(action_id):
+                [r] = rt.work.apply([set_state(refs["a"], "completed", "done",
+                                               evidence=[action_id])]).rejected
+                self.assertIn("cannot be evidence", r["reason"])
+        self.assertEqual(rt.work.get(refs["a"]).state, "active")
+
+    def test_evidence_on_a_non_completion_is_ignored(self):
+        rt = self.runtime()
+        rt.start()
+        refs = rt.work.apply([create("a", "Work A")]).refs
+        failed = rt.act(run(["false"], work=refs["a"])).action.id
+        outcome = rt.work.apply([set_state(refs["a"], "blocked", "stuck", evidence=[failed])])
+        self.assertEqual(outcome.rejected, [])
+        work = rt.work.get(refs["a"])
+        self.assertEqual((work.state, work.evidence, work.completion_basis), ("blocked", [], None))
 
     def test_j_cognition_cannot_set_the_basis(self):
         forged = {**set_state("x", "completed", "done", evidence=["a"]), "completion_basis": "verified"}
@@ -747,10 +784,6 @@ class RuntimeValidationTest(WorkCase):
         return [r["reason"] for r in outcome.rejected]
 
     def test_semantic_rejections(self):
-        self.rt.work.apply([create("o", "Other objective")])
-        other_id = [w.id for w in self.rt.work.all() if w.objective == "Other objective"][0]
-        self.rt.act(run(["true"], work=other_id))
-        foreign = self.rt.work.attempts(other_id, 1)[0]["id"]
         self.rt.act(run(["/nonexistent/binary"], work=self.wid))  # failed_to_execute
         failed = self.rt.work.attempts(self.wid, 1)[0]["id"]
         cases = {
@@ -760,12 +793,10 @@ class RuntimeValidationTest(WorkCase):
             "unknown state": (set_state(self.wid, "paused"), "unknown work state"),
             "empty reason": (set_state(self.wid, "blocked", reason=" "), "non-empty"),
             "no evidence": (set_state(self.wid, "completed"), "needs evidence"),
-            "foreign evidence": (set_state(self.wid, "completed", evidence=[foreign]),
-                                 "not an attempt at this work"),
+            "invented evidence": (set_state(self.wid, "completed", evidence=["no-such-action"]),
+                                  "not a recorded action"),
             "failed evidence": (set_state(self.wid, "completed", evidence=[failed]),
                                 "cannot be evidence"),
-            "evidence elsewhere": (set_state(self.wid, "blocked", evidence=[failed]),
-                                   "only applies to completion"),
             "wait on non-waiting": (set_state(self.wid, "blocked", wait_seconds=60),
                                     "only applies to waiting"),
             "absurd wait": (set_state(self.wid, "waiting", wait_seconds=-5), "wait_seconds"),
