@@ -62,6 +62,13 @@ names the commit that introduced it.
   moved from every situation into the instructions, once and shorter; sections keep a
   short `source` and provenance labels. `context.limits` is gone. A fresh situation is
   about 3,500 characters instead of 10,500.
+- Instructions: an active directive that asks for improving Kairo's own code now
+  authorises proactive improvement within what it describes (the "concrete observed
+  reason" rule stays the default); work a directive asks for is not busywork, and when
+  its obvious work is done Kairo looks for the next worthwhile thing before long
+  sleeps; when unsure whether something is possible or permitted, Kairo tests it with a
+  harmless check instead of waiting for the operator. The instructions are no longer
+  than before the cleanup.
 
 ### Removed
 

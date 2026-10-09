@@ -99,6 +99,31 @@ class DirectiveInContextTest(WorkCase):
         self.assertEqual(s["directives"]["source"], "runtime records, set by the operator")
 
 
+class InstructionsTest(unittest.TestCase):
+    """What the 72-hour run showed the instructions must say (docs/72-hour-autonomy-
+    experiment-report.md, sections 8 and 18)."""
+
+    def test_a_directive_can_authorise_improving_kairos_own_code(self):
+        self.assertIn("only for a concrete observed reason", INSTRUCTIONS)  # still the default
+        self.assertIn("An active directive whose statement or description asks for improving "
+                      "Kairo's own code authorises proactive improvement within what it "
+                      "describes", " ".join(INSTRUCTIONS.split()))
+        for still in ("inspect before changing", "regression test", "runtime.deploy",
+                      "trust-critical files"):
+            self.assertIn(still, INSTRUCTIONS)
+
+    def test_directive_work_is_not_busywork_and_harmless_checks_beat_waiting(self):
+        text = " ".join(INSTRUCTIONS.split())
+        self.assertIn("Do not invent busywork", text)
+        self.assertIn("Work an active directive asks for is not busywork", text)
+        self.assertIn("compare with how good comparable projects do it", text)
+        self.assertIn("test it with a harmless check (a dry run, for example) instead of "
+                      "waiting for the operator", text)
+
+    def test_no_longer_than_before_the_cleanup(self):
+        self.assertLessEqual(len(INSTRUCTIONS), 7712)  # len(INSTRUCTIONS) before the cleanup
+
+
 class UnboundImplementationsTest(ImplCase):
     def test_a_package_is_available_without_naming_any_directive(self):
         pkg(self.root, "docs", files={"tools/run.py": ECHO}, tools=[tool("run")])

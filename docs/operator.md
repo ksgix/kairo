@@ -32,7 +32,7 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
   - Directives are never edited or deleted, only deactivated and activated again, so Work linked to one keeps its meaning.
   - Each records `origin: "operator"` and a history (`created`, `deactivated`, `activated`, with time and origin).
   - A statement is 1–500 characters, and an active duplicate (same words, any case or spacing) is refused.
-  - A description (required, 1–4,000 characters) says what the purpose covers: intent, scope, expectations, boundaries. Kairo decides the concrete work itself. Directives created before descriptions existed show none.
+  - A description (required, 1–4,000 characters) says what the purpose covers: intent, scope, expectations, boundaries. Kairo decides the concrete work itself. A directive that asks for improving Kairo's own code authorises proactive improvement within what it describes; without one, Kairo changes its code only for a concrete reason. Directives created before descriptions existed show none.
 - **Evidence.**
   - Messages, directives and their history are persisted records.
   - Wakes appear as the lifecycle and cycle wake reason.
