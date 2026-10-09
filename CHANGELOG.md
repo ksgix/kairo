@@ -47,6 +47,11 @@ names the commit that introduced it.
   (verified successful, or unverified with exit 0), not only the work's own attempts.
   Each evidence entry records `own_attempt`. Evidence sent with a state change other
   than completion is ignored instead of rejecting the change.
+- Action output in the situation: a result new since the last decision shows up to
+  6,000 characters per stream (24,000 across all new results, newest first); every
+  older action shows at most 400. It was 1,500 for every action, which made cognition
+  re-read cut-off output and let old output fill an idle situation. Stored records are
+  unchanged.
 
 ### Removed
 

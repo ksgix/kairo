@@ -34,7 +34,9 @@ TRUNCATED = "[truncated "
 # Strings exempt from the per-string cap (Limits.text) because their own section
 # bounds them, with larger limits: paths into the situation, "*" for any list item.
 LONG_TEXT = frozenset({("directives", "active", "*", "description"),
-                       ("work", "open", "*", "understanding")})
+                       ("work", "open", "*", "understanding"),
+                       ("history", "actions", "items", "*", "output", "stdout"),
+                       ("history", "actions", "items", "*", "output", "stderr")})
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,13 @@ class Limits:
     actions: int = 15
     cycles: int = 10
     text: int = 2000           # characters per string, anywhere
-    action_output: int = 1500  # characters of stdout / stderr per action
+    # Output of actions, per stream (stdout, stderr), beginning and end kept: results
+    # new since the last decision up to ``action_output_new`` each and
+    # ``action_output_new_total`` together (newest first); every other one, and new
+    # ones once the total is used up, up to ``action_output_old``.
+    action_output_new: int = 6000
+    action_output_new_total: int = 24_000
+    action_output_old: int = 400
     assessment: int = 600      # characters of an earlier cycle's assessment
     work_open: int = 8         # open work items (most recently updated)
     work_closed: int = 5       # recently completed or abandoned work items
@@ -288,8 +296,20 @@ def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
 
 
 def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
+    new = set(_new_results(ctx))
+    shown = ctx.recent_actions[-limits.actions:]
+    # Output room per action, decided newest first: new results share the total.
+    remaining, room = limits.action_output_new_total, {}
+    for rec in reversed(shown):
+        if rec.get("id") in new and remaining > 0:
+            room[id(rec)] = max(min(limits.action_output_new, remaining), limits.action_output_old)
+            output = (rec.get("result") or {}).get("output") or {}
+            remaining -= sum(min(len(t), room[id(rec)]) for t in
+                             (output.get("stdout"), output.get("stderr")) if isinstance(t, str))
+        else:
+            room[id(rec)] = limits.action_output_old
     items = []
-    for rec in ctx.recent_actions[-limits.actions:]:
+    for rec in shown:
         result = rec.get("result") or {}
         output = result.get("output") or {}
         verification = rec.get("verification") or {}
@@ -304,7 +324,7 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             "failure": failure_of(rec),
             "returncode": output.get("returncode"),
             **_external(rec, result),
-            "output": _content(rec, output, limits.action_output),
+            "output": _content(rec, output, room[id(rec)]),
             "error": result.get("error"),
             "verification": {"outcome": verification.get("outcome"),
                              "detail": verification.get("detail")} if verification else None,
@@ -404,7 +424,7 @@ def _open_threads(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         # interrupted attempt made without a changed understanding).
         "attempts_refused": [r for r in last_rejected if r.get("op") == "action_refused"],
         # Actions the previous cycle requested: their results are new since that decision.
-        "new_action_results": [a.get("id") for a in (last or {}).get("actions") or []],
+        "new_action_results": _new_results(ctx),
         "previous_cycle_failed": {"failure": last_cog.get("failure"),
                                   "ended": _when(last.get("at"), now)}
         if last is not None and last_cog.get("result") == "failed" else None,
@@ -831,6 +851,12 @@ def _cap(text: Any, limit: int) -> Any:
 
 def _omitted(total: int | None, shown: int) -> int | None:
     return None if total is None else max(total - shown, 0)
+
+
+def _new_results(ctx: Context) -> list[Any]:
+    """Ids of the actions the previous cycle requested: results new since that decision."""
+    return [a.get("id") for a in (_last(ctx.recent_cycles) or {}).get("actions") or []
+            if isinstance(a, dict)]
 
 
 def _last(records: list[dict[str, Any]]) -> dict[str, Any] | None:

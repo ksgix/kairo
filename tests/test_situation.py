@@ -280,7 +280,7 @@ class ReviewRegressionTest(SituationCase):
                        for i in range(15)]
         s = build_situation(Context(environment={}, directives=[], messages=old_chat,
                                     recent_actions=new_actions, runtime={"now": 3000.0}),
-                            Limits(budget=42_000))  # 10B's notes take ~1.5k of the fixed part
+                            Limits(budget=42_000, action_output_old=1500))  # outputs shown whole
         self.assertGreater(s["context"]["trimmed_for_budget"], 0)
         # The oldest go first, across kinds, but each kind keeps its newest
         # history_keep items: the operator's latest messages are never all lost
@@ -431,8 +431,8 @@ class BoundsTest(SituationCase):
         rt = self.runtime()
         rt.start()
         run_action(rt, [sys.executable, "-c", "print('z' * 20000)"])
-        [a] = situation_of(rt)["history"]["actions"]["items"]
-        self.assertLessEqual(len(a["output"]["stdout"]), LIMITS.action_output)
+        [a] = situation_of(rt)["history"]["actions"]["items"]  # not new: no decision asked for it
+        self.assertLessEqual(len(a["output"]["stdout"]), LIMITS.action_output_old)
         self.assertIn("[truncated", a["output"]["stdout"])
         self.assertLess(len(rt.memory.all("action")[0]["result"]["output"]["stdout"]), 16_100)
 
@@ -448,6 +448,54 @@ class BoundsTest(SituationCase):
         kept = s["history"]["actions"]["items"]
         self.assertTrue(kept and kept[-1]["output"]["stdout"].startswith("7"))  # newest survives
         self.assertEqual(s["history"]["actions"]["omitted_older"], 8 - len(kept))
+
+
+def output_context(sizes, new=()):
+    """A context with one finished action per size (stdout of that many characters),
+    oldest first; ``new``: indexes the previous cycle requested."""
+    actions = [{"id": f"a{i}", "kind": "process.run", "params": {"argv": ["x"]}, "reason": "r",
+                "status": "finished", "started_at": 100.0 + i, "finished_at": 101.0 + i,
+                "result": {"action_id": f"a{i}", "executed": True,
+                           "output": {"returncode": 0, "stdout": "y" * (n - 1) + str(i % 10),
+                                      "stderr": ""}},
+                "verification": {"outcome": "unverifiable", "detail": "no verifier"}}
+               for i, n in enumerate(sizes)]
+    cycles = [{"at": 200.0, "state": "awake", "actions": [{"id": f"a{i}"} for i in new],
+               "cognition": {"result": "decided"}}] if new else []
+    return Context(environment={}, directives=[], messages=[], runtime={"now": 1000.0},
+                   recent_actions=actions, recent_cycles=cycles)
+
+
+class ActionOutputTest(unittest.TestCase):
+    def outputs(self, ctx):
+        return {a["id"]: a["output"]["stdout"]
+                for a in build_situation(ctx)["history"]["actions"]["items"]}
+
+    def test_a_new_result_is_shown_whole(self):
+        ctx = output_context([5000, 5000], new=[1])
+        out = self.outputs(ctx)
+        self.assertEqual(out["a1"], ctx.recent_actions[1]["result"]["output"]["stdout"])
+        self.assertNotIn("[truncated", out["a1"])
+        self.assertLessEqual(len(out["a0"]), LIMITS.action_output_old)  # older: cut, marked
+        self.assertIn("[truncated", out["a0"])
+
+    def test_new_results_share_a_total_newest_first(self):
+        ctx = output_context([9000] * 6, new=range(6))
+        out = self.outputs(ctx)
+        sizes = [len(out[f"a{i}"]) for i in range(6)]
+        for i in (5, 4, 3, 2):  # newest first: 4 x 6,000 is the whole total
+            self.assertLessEqual(sizes[i], LIMITS.action_output_new)
+            self.assertGreater(sizes[i], LIMITS.action_output_new - 100)
+        for i in (1, 0):        # the total is used up: the old size
+            self.assertLessEqual(sizes[i], LIMITS.action_output_old)
+        self.assertTrue(all("[truncated" in out[f"a{i}"] for i in range(6)))
+        self.assertTrue(all(out[f"a{i}"].endswith(str(i)) for i in range(6)))  # ends kept
+
+    def test_old_outputs_keep_an_idle_situation_small(self):
+        ctx = output_context([5000] * 15)
+        text = render_situation(build_situation(ctx))
+        self.assertLess(len(text), 25_000)
+
 
 
 class SecurityTest(SituationCase):

@@ -179,7 +179,7 @@ A tool that acts on another system declares it. Undeclared tools keep the plain 
 - **Output limits:**
   - Output is read from pipes, nothing goes to disk, and the first and last 500 KB are kept per stream.
   - A program writing more than 8 MB to a stream is stopped (failure `output_limit`; `unknown` for an `external` tool).
-  - Records keep the beginning and the end (16,000 characters), and the situation shows 1,500 characters of each stream, beginning and end.
+  - Records keep the beginning and the end (16,000 characters), and the situation shows each stream's beginning and end: up to 6,000 characters for a result new since the last decision (24,000 across all new results, newest first), and 400 for every older one.
 - **Not provided:**
   - dependency installation (requirements are only detected);
   - dependencies between implementations;
@@ -207,7 +207,7 @@ A tool that acts on another system declares it. Undeclared tools keep the plain 
 | `context` | Limits, redaction and truncation counts, what was trimmed, and anything unavailable |
 
 - **Provenance:** every section names its source, and times carry `age_seconds`. Cognition's own earlier assessments are labelled as interpretation, not fact. Missing data is shown as missing (`"unknown"`, `null`) and never invented.
-- **Bounds:** the most recent 10 cycles, 15 actions and 20 messages; 1,500 characters of output per action stream; 2,000 characters per string; and a 60,000-character total budget. Every omission is counted.
+- **Bounds:** the most recent 10 cycles, 15 actions and 20 messages; action output per stream up to 6,000 characters for new results (24,000 together) and 400 for older ones, every cut marked; 2,000 characters per other string; and a 60,000-character total budget. Every omission is counted.
   - Two long texts have their own bounds instead of the 2,000-character cap: work understanding (up to 10,000 per item, 20,000 across open work; active and most recently updated work first, every item keeping at least 1,000) and directive descriptions (up to 4,000 each, 12,000 together, at least 500 each). Shortening keeps the beginning and the end and is marked (`understanding_shortened`, `description_shortened`).
   - Over budget, the oldest history goes first, down to the newest 5 of each kind; then the longest long texts are shortened toward their floors; only then does the rest of the history go. Work facts (states, attempts, recovery, strategy revisions) are never trimmed.
 - **Robustness:** a corrupt record is reported as unavailable and does not stop the cycle.
