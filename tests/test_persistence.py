@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kairo import Chat, Directives, Memory, Message, Sender, Todo
+from kairo import Chat, Directives, Memory, Message, Sender
 
 
 class PersistenceCase(unittest.TestCase):
@@ -69,28 +69,6 @@ class DirectivesTest(PersistenceCase):
     def test_set_active_unknown_raises(self):
         with self.assertRaises(KeyError):
             Directives(Memory()).set_active("missing", True)
-
-
-class TodoTest(PersistenceCase):
-    def test_create_read_complete_remove_persist(self):
-        memory = Memory(self.path)
-        todo = Todo(memory)
-        a = todo.add("Check disk usage on /var", directive_id="d1")
-        b = todo.add("Review nightly backup log")
-
-        memory = self.reopen(memory)
-        todo = Todo(memory)
-        self.assertEqual(todo.get(a.id), a)
-        self.assertEqual(todo.get(a.id).directive_id, "d1")
-
-        todo.complete(a.id)
-        self.assertEqual([i.id for i in todo.open()], [b.id])
-        self.assertTrue(todo.remove(b.id))
-
-        memory = self.reopen(memory)
-        todo = Todo(memory)
-        self.assertEqual(todo.open(), [])
-        self.assertTrue(todo.get(a.id).done)
 
 
 class ChatTest(PersistenceCase):

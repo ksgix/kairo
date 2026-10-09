@@ -111,12 +111,12 @@ class CycleTest(unittest.TestCase):
         self.memory = Memory()
         self.addCleanup(self.memory.close)
 
-    def test_empty_todo_does_not_imply_sleep(self):
+    def test_nothing_listed_does_not_imply_sleep(self):
         cognition = ScriptedCognition(Decision(reason="still exploring"))
         runtime = Runtime(self.memory, cognition=cognition)
         runtime.start()
         report = runtime.cycle()
-        self.assertEqual(cognition.seen[0].todo, [])
+        self.assertEqual(cognition.seen[0].open_work, [])
         self.assertIs(report.state, State.AWAKE)
 
     def test_cycle_passes_context_and_executes_verified_actions(self):
@@ -132,7 +132,6 @@ class CycleTest(unittest.TestCase):
         runtime = Runtime(self.memory, cognition=cognition,
                           verifiers={"process.run": ExitZero()})
         d = runtime.directives.add("Keep the host healthy.")
-        runtime.todo.add("probe host", directive_id=d.id)
         runtime.receive("hello")
         runtime.start()
 
@@ -140,7 +139,6 @@ class CycleTest(unittest.TestCase):
 
         ctx = cognition.seen[0]
         self.assertEqual([x.id for x in ctx.directives], [d.id])
-        self.assertEqual([t.description for t in ctx.todo], ["probe host"])
         self.assertEqual([m.text for m in ctx.messages], ["hello"])
         self.assertIn("hostname", ctx.environment)
 

@@ -800,8 +800,7 @@ class BoundaryTest(DashboardCase):
             self.fails(self.post(path, {"argv": ["touch", str(self.dir / "pwned")]}), 404,
                        "not_found")
         self.assertFalse((self.dir / "pwned").exists())
-        self.assertEqual((runtime.memory.count("action"), runtime.memory.count("work"),
-                          runtime.memory.count("todo")), (0, 0, 0))
+        self.assertEqual((runtime.memory.count("action"), runtime.memory.count("work")), (0, 0))
         self.assertFalse({op for op in ROUTES.values()} &
                          {"execute", "shell", "run", "action", "deploy", "sql"})
 

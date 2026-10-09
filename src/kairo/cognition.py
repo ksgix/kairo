@@ -28,7 +28,6 @@ from kairo.actions import Action
 from kairo.redact import protect_env, protect_files, redact
 from kairo.chat import Message
 from kairo.directives import Directive
-from kairo.todo import TodoItem
 from kairo.work import MAX_EVIDENCE, MAX_REQUESTS, WorkState
 
 
@@ -40,7 +39,6 @@ class Context:
 
     environment: dict[str, Any]
     directives: list[Directive]
-    todo: list[TodoItem]
     messages: list[Message]
     # Why the runtime is awake now: first start, recovery, message, timer, ...
     wake_reason: str = ""
@@ -53,9 +51,7 @@ class Context:
     available_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Recent cycle-log records: what cognition decided (or how it failed) before.
     recent_cycles: list[dict[str, Any]] = field(default_factory=list)
-    # Recently completed to-do items.
-    done_todo: list[TodoItem] = field(default_factory=list)
-    # Total records per kind (directive, todo, message, action, cycle, ...).
+    # Total records per kind (directive, message, action, cycle, ...).
     counts: dict[str, int] = field(default_factory=dict)
     # The observation from the previous cycle, with "observed_at", if any.
     previous_observation: dict[str, Any] | None = None

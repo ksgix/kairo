@@ -180,8 +180,8 @@ class RunForeverTest(LoopCase):
         self.assertEqual(cognition.contexts[2].wake_reason, "reassessment due")
         self.stop(runtime, thread)
 
-    def test_multiple_cycles_and_empty_todo_is_not_idleness(self):
-        # Cognition keeps working with an empty to-do list; the runtime must
+    def test_multiple_cycles_until_cognition_chooses_sleep(self):
+        # Cognition keeps working with nothing listed anywhere; the runtime must
         # not put itself to sleep because of that.
         cognition = Cognition(lambda c, n: Decision(sleep=n >= 5, reason=f"cycle {n}"))
         runtime = self.open(cognition=cognition)
@@ -189,7 +189,6 @@ class RunForeverTest(LoopCase):
         cognition.wait_calls(5)
         self.assertTrue(runtime.wait_for(State.SLEEPING, TIMEOUT))
         self.assertEqual(len(cognition.contexts), 5)
-        self.assertTrue(all(ctx.todo == [] for ctx in cognition.contexts))
         self.stop(runtime, thread)
 
     def test_failing_cognition_does_not_end_the_loop(self):
@@ -264,7 +263,6 @@ class RestartTest(LoopCase):
     def test_restart_reconstructs_the_same_kairo(self):
         first = self.open(cognition=Cognition(always_sleep))
         directive = first.directives.add("Keep the host healthy.")
-        item = first.todo.add("look at /var/log")
         first.receive("remember me")
         thread = self.launch(first)
         self.assertTrue(first.wait_for(State.SLEEPING, TIMEOUT))
@@ -280,7 +278,6 @@ class RestartTest(LoopCase):
         ctx = cognition.contexts[0]
         self.assertEqual(ctx.wake_reason, "started after clean stop")
         self.assertEqual([d.id for d in ctx.directives], [directive.id])
-        self.assertEqual([t.id for t in ctx.todo], [item.id])
         self.assertEqual([m.text for m in ctx.messages], ["remember me"])
         self.assertEqual(second.identity["starts"], 2)
         self.stop(second, thread)

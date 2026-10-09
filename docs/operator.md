@@ -43,7 +43,6 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
   - no execute, shell or action operation (direct operation of the host is SSH, outside Kairo);
   - no Work editing (ask Kairo in a message);
   - no deployment or configuration operations;
-  - no todo operations (todo is unused operational state; deferred);
   - no paged action history (the situation shows recent actions);
   - no network listener: the socket is local. The [dashboard](dashboard.md) is a separate HTTP adapter over these same operations.
 

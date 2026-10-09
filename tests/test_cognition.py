@@ -104,7 +104,7 @@ class CognitionCase(unittest.TestCase):
         return ClaudeCognition(executable=str(self.fake.executable), **kwargs)
 
     def context(self, **kwargs):
-        return Context(environment={"hostname": "h"}, directives=[], todo=[], messages=[],
+        return Context(environment={"hostname": "h"}, directives=[], messages=[],
                        available_actions=ACTIONS, **kwargs)
 
     def assertCognitionError(self, category, fn, *args):
@@ -165,7 +165,7 @@ class RenderContextTest(unittest.TestCase):
         secret = "sk-test-abcdefghijklmnop"
         with mock.patch.dict(os.environ, {"SOME_API_KEY": secret}):
             ctx = Context(
-                environment={"hostname": "h"}, directives=[], todo=[], messages=[],
+                environment={"hostname": "h"}, directives=[], messages=[],
                 recent_actions=[{"id": "a", "result": {"output": {
                     "stdout": f"SOME_API_KEY={secret}\n" + "x" * 5000}}}],
                 available_actions=ACTIONS)
@@ -274,7 +274,6 @@ class ClaudeInRuntimeTest(CognitionCase):
         self.fake.plan({"decision": decision()})
         runtime = self.runtime()
         d = runtime.directives.add("Keep the host healthy.")
-        runtime.todo.add("check backups", directive_id=d.id)
         runtime.chat.post("human", "anything wrong?")
         runtime.start()
         runtime.act(Action("process.run", {"argv": ["echo", "earlier"]}, reason="probe"))
@@ -287,7 +286,7 @@ class ClaudeInRuntimeTest(CognitionCase):
         self.assertIn("hostname", situation["environment"]["facts"])
         [directive] = situation["directives"]["active"]
         self.assertEqual((directive["id"], directive["statement"]), (d.id, "Keep the host healthy."))
-        self.assertEqual(situation["todo"]["open"][0]["description"], "check backups")
+        self.assertNotIn("todo", situation)
         self.assertEqual(situation["history"]["chat"]["items"][0]["text"], "anything wrong?")
         [earlier] = situation["history"]["actions"]["items"]
         self.assertEqual(earlier["output"]["stdout"], "earlier\n")

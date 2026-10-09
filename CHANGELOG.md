@@ -41,6 +41,14 @@ names the commit that introduced it.
   and dashboard documentation moved into `docs/` (`297853b`).
 - `tests` is now a package, so the suite also runs by dotted module name (`b9ab067`).
 
+### Removed
+
+- Todo: `kairo.todo`, `Runtime.todo`, the `todo` situation section, the open to-do counts
+  in `directives` and `open_threads`, and the Todo page of the dashboard. Nothing could
+  write a todo item, and none was ever created. Existing `todo` records are no longer
+  read. The operator protocol stays version 2; its `status` result no longer has the
+  `open_todo` field.
+
 ### Fixed
 
 - Restart test redaction path fragility (`9eb0ca9`).

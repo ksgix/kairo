@@ -6,7 +6,7 @@
 (() => {
   const CSRF = document.querySelector('meta[name="kairo-csrf"]').content;
   const STATUS_EVERY = 5000, PAGE_EVERY = 15000, CHAT_EVERY = 5000, MAX_BACKOFF = 60000;
-  const PAGES = ["overview", "chat", "directives", "work", "todo", "activity", "context", "system"];
+  const PAGES = ["overview", "chat", "directives", "work", "activity", "context", "system"];
   const S = {
     page: PAGES.includes(location.hash.slice(1)) ? location.hash.slice(1) : "overview",
     status: null, statusErr: null, situation: null, situationErr: null,
@@ -143,7 +143,7 @@
   }
   const PAGE_LOADS = {
     overview: [loadSituation], chat: [loadChat], directives: [loadDirectives, loadSituation],
-    work: [loadSituation], todo: [loadSituation], activity: [loadSituation],
+    work: [loadSituation], activity: [loadSituation],
     context: [loadSituation], system: [loadSituation, loadDashboard],
   };
   async function loadPage() {
@@ -247,7 +247,7 @@
           ["last failure", last.failure], ["at", last.at ? epoch(last.at) : null],
         ])),
         card("Counts", prov("fact"), kv([
-          ["active directives", st.directives], ["open work", st.open_work], ["open todo", st.open_todo],
+          ["active directives", st.directives], ["open work", st.open_work],
           ["implementations", (st.implementations || []).map((i) => `${i.id} (${i.state})`).join(", ") || "none"],
         ])),
         sit ? attention(sit) : null));
@@ -461,18 +461,6 @@
     return out;
   }
 
-  function renderTodo() {
-    const guard = situationGuard();
-    if (guard) return [guard];
-    const todo = S.situation.todo || {};
-    const item = (t, done) => el("li", null, t.description, el("span", {class: "muted"},
-      ` · ${done ? "done " + when(t.done) : "created " + when(t.created)}${t.directive_id ? " · directive " + short(t.directive_id) : ""}`));
-    return [card("Todo", prov("fact"), el("p", {class: "muted"}, todo.meaning || ""),
-      el("p", {class: "muted"}, "Read-only here: the operator interface has no todo operations (todo is operational state, not purpose)."),
-      sub("Open"), (todo.open || []).length ? el("ul", null, todo.open.map((t) => item(t, false))) : el("p", {class: "muted"}, "None."),
-      sub("Recently done"), (todo.recently_done || []).length ? el("ul", null, todo.recently_done.map((t) => item(t, true))) : el("p", {class: "muted"}, "None."))];
-  }
-
   function activityItems(sit) {
     // Newest first. The situation lists each kind oldest first, and ages are whole
     // seconds, so each list is reversed before the (stable) sort.
@@ -580,7 +568,7 @@
   }
 
   const RENDER = {overview: renderOverview, chat: renderChat, directives: renderDirectives, work: renderWork,
-                  todo: renderTodo, activity: renderActivity, context: renderContext, system: renderSystem};
+                  activity: renderActivity, context: renderContext, system: renderSystem};
   function render() {
     renderHeader();
     const main = document.getElementById("main");

@@ -694,7 +694,7 @@ class NoFailureStoreTest(RecoveryCase):
         rt.act(run(["/nonexistent"], work=wid))
         rt.cycle()
         kinds = {k for (k,) in rt.memory._db.execute("SELECT DISTINCT kind FROM records")}
-        self.assertTrue(kinds <= {"runtime", "action", "cycle", "work", "message", "directive", "todo"})
+        self.assertTrue(kinds <= {"runtime", "action", "cycle", "work", "message", "directive"})
         tables = {t for (t,) in rt.memory._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertEqual(tables, {"records"})
 

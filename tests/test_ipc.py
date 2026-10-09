@@ -81,7 +81,7 @@ class ServerTest(IPCCase):
         self.assertEqual(status["starts"], 1)
         self.assertTrue(status["running"])
         self.assertEqual(status["directives"], 1)
-        self.assertEqual(status["open_todo"], 0)
+        self.assertNotIn("open_todo", status)  # removed with todo; protocol stays 2
         self.assertEqual(status["cognition"], "test")
         self.assertEqual(status["pid"], os.getpid())
         self.assertIn("wake_at", status)

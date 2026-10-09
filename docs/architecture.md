@@ -21,7 +21,6 @@ implementations and the situation model. Back to the [README](../README.md); see
 | `memory.py` | `Memory`: a local SQLite document store (`kind`, `id`, JSON), plus a typed `Collection` view |
 | `directives.py` | `Directive`: an ongoing reason Kairo operates, not a task |
 | `work.py` | Ongoing work: pursuits carried across cycles, with states, strategy revisions and runtime-validated changes |
-| `todo.py` | `TodoItem`: operational notes. They do not drive the runtime; an empty list does not mean idle. |
 | `chat.py` | `Message` / `Chat`: persisted human ⇄ Kairo messages. A message wakes a sleeping runtime. |
 | `implementations.py` | Implementation packages: manifest validation, content digest, the derived catalog |
 | `ipc.py` | The operator boundary: local Unix-socket IPC to the live runtime (reads, human input, wake, stop) and the terminal client |
@@ -33,7 +32,7 @@ implementations and the situation model. Back to the [README](../README.md); see
 `run_forever()` keeps Kairo alive until it is stopped:
 
 - **Awake:** it runs cycles back to back for as long as cognition keeps working.
-- **Sleep:** it sleeps when cognition returns `Decision(sleep=True)`, when there is no cognition provider, or when the provider raises. Sleep is a blocking wait on a condition variable, not polling, and the process stays alive. The to-do list is never a reason to sleep.
+- **Sleep:** it sleeps when cognition returns `Decision(sleep=True)`, when there is no cognition provider, or when the provider raises. Sleep is a blocking wait on a condition variable, not polling, and the process stays alive.
 - **Wake:** a sleeping runtime wakes on
   - a human message (`receive`),
   - an explicit `request_wake(reason)`, or
@@ -41,7 +40,7 @@ implementations and the situation model. Back to the [README](../README.md); see
 
   A message that arrives mid-cycle makes it reassess once more instead of sleeping. Every wake re-observes the environment, and cognition is told why it woke.
 - **Stop:** `stop()`, SIGINT/SIGTERM or an IPC `stop` sets a flag. The loop takes on no new actions, finishes the current one, persists `stopped` and returns.
-- **Restart:** the same Kairo comes back, with the same identity, directives, to-do, chat and action log. It records whether the previous process stopped cleanly, and cognition sees that as the wake reason. Executed actions are never replayed. An action that was running when the process died is marked `interrupted`, not re-run; cognition sees it in `recent_actions` and decides what to do.
+- **Restart:** the same Kairo comes back, with the same identity, directives, work, chat and action log. It records whether the previous process stopped cleanly, and cognition sees that as the wake reason. Executed actions are never replayed. An action that was running when the process died is marked `interrupted`, not re-run; cognition sees it in `recent_actions` and decides what to do.
 
 Without a cognition provider, Kairo observes, sleeps with the reason `no cognition provider configured`, and wakes (and sleeps again) on messages or its reassessment interval.
 
@@ -63,7 +62,6 @@ The layers, from most lasting to most momentary:
 |---|---|
 | Directive | A lasting area of responsibility, set by the operator: a statement of the purpose and a description of what it covers. Why Kairo acts; never a task list. |
 | Work | A pursuit carried across cycles: objective, why it matters, strategy, understanding, next step, state. It may belong to a directive or not. |
-| Todo | Operational notes. Not required for work. There is no operator or cognition path to change them yet. |
 | Action | One runtime operation. When linked, it is an attempt at a work item. |
 | Verification | Runtime evidence about an action's outcome |
 
@@ -205,11 +203,10 @@ A tool that acts on another system declares it. Undeclared tools keep the plain 
 | `kairo` | Identity, when Kairo was first created, how many times it has started, and (with deployment configured) `code`: the running release and recent deployments |
 | `now` | Time, lifecycle state, wake reason, current process, the previous process (and whether it ended cleanly), the previous cycle |
 | `environment` | A fresh host observation and what changed since the previous one |
-| `directives` | Active directives: statement and description (the operator's words), age, open to-do counts and the implementations serving each, plus the number inactive |
+| `directives` | Active directives: statement and description (the operator's words), age and the implementations serving each, plus the number inactive |
 | `work` | Open work, each with its understanding, its recent attempts by strategy revision and recent changes, plus recently closed work with reason or evidence |
-| `todo` | Open items and recently completed ones |
 | `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …) and output, and chat |
-| `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, the open to-do count |
+| `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, elapsed work waits |
 | `knowledge` | Empty for now: the place where a future knowledge store plugs in |
 | `capabilities` | The actions the runtime can really execute (including available implementation tools), whether each is verified automatically, and the bounded implementation catalog with guidance |
 | `context` | Limits, redaction and truncation counts, what was trimmed, and anything unavailable |
@@ -229,7 +226,7 @@ Opt-in live smoke test (uses the model):
 ## Deliberately not implemented yet
 
 - Delegation between providers, and providers other than Claude (the provider interface supports them)
-- Cognition editing directives or to-do items; operator to-do operations
+- Cognition editing directives
 - Work priority or focus, and automatic resumption of elapsed waits
 - Any scheduler beyond the one self-wake deadline; nothing triggers maintenance
 - Remote access: IPC is a local Unix socket protected by file permissions, and the dashboard listens on loopback only (reach it over SSH or a TLS proxy)

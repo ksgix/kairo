@@ -32,7 +32,6 @@ from kairo.environment import Environment
 from kairo.memory import Memory, from_record
 from kairo.redact import head_tail, redact
 from kairo.situation import LIMITS, build_situation
-from kairo.todo import Todo
 from kairo.verification import Outcome, Verification, Verifier, verify
 from kairo.work import ATTEMPT_SCAN, CLOSED, OPEN, WorkError, WorkLedger, WorkState
 
@@ -109,7 +108,6 @@ class Runtime:
         bind = getattr(self.environment, "bind_directives", None)
         if callable(bind):
             bind(self.directives.states)
-        self.todo = Todo(memory)
         self.chat = Chat(memory)
         self.work = WorkLedger(memory)
         self.state = State.CREATED
@@ -378,7 +376,6 @@ class Runtime:
         return {
             **snapshot,
             "directives": len(self.directives.active()),
-            "open_todo": len(self.todo.open()),
             "open_work": len(self.work.open()),
             # Configured implementations, derived from the filesystem (no guidance).
             "implementations": [
@@ -587,7 +584,6 @@ class Runtime:
         context = Context(
             environment=observation,
             directives=read("directives", self.directives.active, []),
-            todo=read("todo", self.todo.open, []),
             messages=read("chat", lambda: self.chat.recent(LIMITS.messages), []),
             wake_reason=self.reason,
             recent_actions=read("actions",
@@ -595,10 +591,8 @@ class Runtime:
             runtime=runtime,
             available_actions=self.environment.actions(),
             recent_cycles=read("cycles", lambda: self.memory.recent("cycle", LIMITS.cycles), []),
-            done_todo=read("done_todo", lambda: sorted(
-                self.todo.done(), key=lambda t: t.done_at or 0)[-LIMITS.done_todo:], []),
             counts={kind: self.memory.count(kind)
-                    for kind in ("directive", "todo", "message", "action", "cycle", "work")},
+                    for kind in ("directive", "message", "action", "cycle", "work")},
             previous_observation=self.memory.get("runtime", "last_cycle"),
             **read("work", self._gather_work, {}),
             implementations=read("implementations", self._implementations_view, []),

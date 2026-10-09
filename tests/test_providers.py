@@ -58,7 +58,7 @@ class Fake:
 
 
 def ctx():
-    return Context(environment={"hostname": "h"}, directives=[], todo=[], messages=[],
+    return Context(environment={"hostname": "h"}, directives=[], messages=[],
                    runtime={"now": 1000.0}, available_actions=ACTIONS)
 
 

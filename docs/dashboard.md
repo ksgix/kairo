@@ -61,7 +61,6 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 - Chat: send messages; a retry reuses the message id, so Kairo stores the message once.
 - Directives: each as one of Kairo's responsibilities (statement, description, state, origin, linked open work, the implementations naming it, history); add with a statement and a description; deactivate, activate.
 - Work: facts, cognition's account, attempts, recovery, unresolved external operations.
-- Todo (read-only).
 - Activity: cycles, actions, deployments.
 - Context: the situation, section by section, as cognition sees it.
 - System: host, release, capabilities, implementations, wake and stop.
@@ -88,5 +87,5 @@ Polling reads only, every 5–15 s, pauses while the tab is hidden, and backs of
 - Secrets are redacted by Kairo before anything leaves the socket. The token is never served or logged, and request logs carry only the method and path.
 - Requests are bounded: 16 at once. Kairo still answers them one at a time.
 
-**Not available, by design:** no shell, process or action execution; no implementation calls; no SQL or database access; no file access; no Work or todo editing; no deployment or configuration; no arbitrary HTTP or debug endpoints. Anything else is asked of Kairo in a message, and Kairo does it as an ordinary, recorded and verified action, or not at all.
+**Not available, by design:** no shell, process or action execution; no implementation calls; no SQL or database access; no file access; no Work editing; no deployment or configuration; no arbitrary HTTP or debug endpoints. Anything else is asked of Kairo in a message, and Kairo does it as an ordinary, recorded and verified action, or not at all.
 

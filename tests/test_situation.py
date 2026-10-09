@@ -99,33 +99,19 @@ class IdentityAndStateTest(SituationCase):
         self.assertEqual((before["chose_sleep"], before["wake_after_seconds"]), (True, 600))
 
 
-class DirectivesAndTodoTest(SituationCase):
+class DirectivesTest(SituationCase):
     def test_directives(self):
         rt = self.runtime()
         keep = rt.directives.add("Keep the host healthy.")
         old = rt.directives.add("Migrate the old service.")
         rt.directives.set_active(old.id, False)
-        rt.todo.add("check backups", directive_id=keep.id)
-        rt.todo.add("unrelated note")
         d = situation_of(rt)["directives"]
         [active] = d["active"]
         self.assertEqual((active["id"], active["statement"]), (keep.id, "Keep the host healthy."))
-        self.assertEqual(active["open_todo_items"], 1)
+        self.assertNotIn("open_todo_items", active)
         self.assertIn("age_seconds", active["since"])
         self.assertEqual(d["inactive"], 1)
         self.assertIn("not tasks", d["meaning"])
-
-    def test_todo_open_done_and_bounds(self):
-        rt = self.runtime()
-        items = [rt.todo.add(f"item {i}") for i in range(5)]
-        rt.todo.complete(items[0].id)
-        t = situation_of(rt, Limits(open_todo=2))["todo"]
-        self.assertEqual([i["description"] for i in t["open"]], ["item 3", "item 4"])
-        self.assertEqual(t["open_omitted"], 2)
-        [done] = t["recently_done"]
-        self.assertEqual(done["description"], "item 0")
-        self.assertIn("age_seconds", done["done"])
-        self.assertIn("Not Kairo's purpose", t["meaning"])
 
     def test_records_without_timestamps_are_unknown_not_invented(self):
         rt = self.runtime()
@@ -278,7 +264,7 @@ class ReviewRegressionTest(SituationCase):
         self.assertIn("age_seconds", now["previous_cycle"]["ended"])
 
     def test_future_timestamps_are_not_fresh(self):
-        ctx = Context(environment={}, directives=[], todo=[], messages=[],
+        ctx = Context(environment={}, directives=[], messages=[],
                       recent_cycles=[{"at": 5000.0, "state": "sleeping", "cognition": {}}],
                       runtime={"now": 1000.0})
         ended = build_situation(ctx)["now"]["previous_cycle"]["ended"]
@@ -292,7 +278,7 @@ class ReviewRegressionTest(SituationCase):
                         "started_at": 2000 + i, "finished_at": 2000 + i,
                         "result": {"executed": True, "output": {"stdout": "o" * 1400}}}
                        for i in range(15)]
-        s = build_situation(Context(environment={}, directives=[], todo=[], messages=old_chat,
+        s = build_situation(Context(environment={}, directives=[], messages=old_chat,
                                     recent_actions=new_actions, runtime={"now": 3000.0}),
                             Limits(budget=42_000))  # 10B's notes take ~1.5k of the fixed part
         self.assertGreater(s["context"]["trimmed_for_budget"], 0)
@@ -424,7 +410,7 @@ class EnvironmentAndCapabilitiesTest(SituationCase):
 
 class KnowledgeTest(unittest.TestCase):
     def ctx(self, **kw):
-        return Context(environment={}, directives=[], todo=[], messages=[],
+        return Context(environment={}, directives=[], messages=[],
                        runtime={"now": 1000.0}, **kw)
 
     def test_empty_knowledge_is_explicit(self):
@@ -503,7 +489,7 @@ class SecurityTest(SituationCase):
 
             __str__ = __repr__
 
-        ctx = Context(environment={"weird": Credential()}, directives=[], todo=[], messages=[],
+        ctx = Context(environment={"weird": Credential()}, directives=[], messages=[],
                       runtime={"now": 1.0})
         text = render_situation(build_situation(ctx))
         self.assertNotIn("abc123abc123", text)
@@ -512,9 +498,9 @@ class SecurityTest(SituationCase):
 
 class RobustnessTest(SituationCase):
     def test_empty_state(self):
-        s = build_situation(Context(environment={}, directives=[], todo=[], messages=[]))
+        s = build_situation(Context(environment={}, directives=[], messages=[]))
         self.assertEqual(s["directives"]["active"], [])
-        self.assertEqual(s["todo"]["open"], [])
+        self.assertNotIn("todo", s)
         for part in ("cycles", "actions", "chat"):
             self.assertEqual(s["history"][part]["items"], [])
         self.assertIsNone(s["now"]["previous_cycle"])
@@ -527,13 +513,13 @@ class RobustnessTest(SituationCase):
         rt.memory.put("action", "bad", {"id": "bad", "result": "garbage", "verification": 5})
         rt.memory.put("cycle", "bad", {"cognition": ["not", "a", "dict"], "at": "yesterday"})
         rt.memory.put("message", "bad", {"no": "fields"})
-        rt.memory.put("todo", "bad", {"description": 5})  # known field, wrong type
+        rt.memory.put("todo", "old", {"description": 5})  # a removed kind: no longer read
         rt.start()
         with self.assertLogs("kairo", "WARNING"):
             report = rt.cycle()
         self.assertIs(report.state, State.SLEEPING)  # the cycle completed normally
         s = cognition.situations[0]
-        self.assertEqual(set(s["context"]["unreadable_records"]), {"chat", "todo", "done_todo"})
+        self.assertEqual(set(s["context"]["unreadable_records"]), {"chat"})
         self.assertIn("history.actions", s["context"]["unavailable_sections"])
         self.assertIn("history.cycles", s["context"]["unavailable_sections"])
         self.assertIn("unavailable", s["history"]["actions"])

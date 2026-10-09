@@ -5,7 +5,6 @@ Layers, from lasting to momentary:
     directive      a lasting area of responsibility ("keep the 1C environment healthy")
     work           a pursuit within (or discovered outside) a directive: an objective,
                    why it matters, the current strategy and understanding, a state
-    todo           operational notes, maintained by the operator
     action         one concrete runtime operation; an attempt at a work item when linked
     verification   runtime evidence about an action's outcome
 

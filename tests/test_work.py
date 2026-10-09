@@ -106,7 +106,7 @@ class WorkCase(unittest.TestCase):
 
 
 class CreateAndContinueTest(WorkCase):
-    def test_create_needs_no_todo_and_appears_next_cycle(self):
+    def test_create_appears_next_cycle(self):
         cognition = plan(Decision(work=[create("disk", "Find why /var keeps filling up")],
                                   sleep=False))
         rt = self.runtime(cognition)
@@ -117,8 +117,6 @@ class CreateAndContinueTest(WorkCase):
         seen = only_open(cognition.situations[1])
         self.assertEqual(seen["id"], record["id"])
         self.assertEqual(seen["strategy"], {"revision": 1, "text": "look first"})
-        # No todo exists, and the work is still there to pursue.
-        self.assertEqual(cognition.situations[1]["todo"]["open"], [])
         cycle = cognition.situations[1]["history"]["cycles"]["items"][0]
         self.assertEqual(cycle["work_applied"][0]["work_id"], record["id"])
 

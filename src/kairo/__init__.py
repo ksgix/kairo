@@ -7,12 +7,11 @@ from kairo.directives import Directive, Directives
 from kairo.environment import Environment
 from kairo.memory import Memory
 from kairo.runtime import CycleReport, LifecycleError, Runtime, State, Step
-from kairo.todo import Todo, TodoItem
 from kairo.verification import Outcome, Verification, Verifier, verify
 
 __all__ = [
     "Action", "ActionResult", "Chat", "CognitionProvider", "Context", "CycleReport",
     "Decision", "Directive", "Directives", "Environment", "LifecycleError", "Memory",
-    "Message", "Outcome", "Runtime", "Sender", "State", "Step", "Todo", "TodoItem",
-    "Verification", "Verifier", "verify",
+    "Message", "Outcome", "Runtime", "Sender", "State", "Step", "Verification", "Verifier",
+    "verify",
 ]

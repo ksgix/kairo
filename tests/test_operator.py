@@ -122,7 +122,7 @@ class ReadTest(OperatorCase):
         self.assertEqual(situation["now"]["lifecycle_state"], "sleeping")
         self.assertEqual(situation["now"]["process"]["cycles_completed"], len(cognition.contexts))
         self.assertEqual(set(situation), {"kairo", "now", "environment", "directives", "work",
-                                          "todo", "history", "open_threads", "knowledge",
+                                          "history", "open_threads", "knowledge",
                                           "capabilities", "context"})
         self.assertLessEqual(len(json.dumps(situation)), 70_000)  # bounded by the situation budget
 

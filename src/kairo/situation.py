@@ -42,8 +42,6 @@ class Limits:
     """Selection rules and size bounds. Lists keep the most recent items."""
 
     directives: int = 20
-    open_todo: int = 30
-    done_todo: int = 5
     messages: int = 20
     actions: int = 15
     cycles: int = 10
@@ -101,7 +99,6 @@ def build_situation(context: Context, limits: Limits = LIMITS) -> dict[str, Any]
         "environment": section("environment", lambda: _environment(context, now)),
         "directives": section("directives", lambda: _directives(context, now, limits)),
         "work": section("work", lambda: _work(context, now, limits)),
-        "todo": section("todo", lambda: _todo(context, now, limits)),
         "history": {
             "cycles": section("history.cycles", lambda: _cycles(context, now, limits)),
             "actions": section("history.actions", lambda: _actions(context, now, limits)),
@@ -224,10 +221,6 @@ def _environment(ctx: Context, now: float) -> dict[str, Any]:
 
 
 def _directives(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
-    open_by_directive: dict[str, int] = {}
-    for item in ctx.todo:
-        if item.directive_id:
-            open_by_directive[item.directive_id] = open_by_directive.get(item.directive_id, 0) + 1
     served: dict[str, list[Any]] = {}  # directive id -> implementations serving it
     for impl in _serving(ctx):
         for directive_id in impl.get("serves") or []:
@@ -242,7 +235,6 @@ def _directives(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             "statement": d.statement,
             "description": _shorten(d.description, allow),
             "since": _when(d.created_at, now),
-            "open_todo_items": open_by_directive.get(d.id, 0),
             "implementations": served.get(d.id, []),
         }
         if isinstance(d.description, str) and len(d.description) > allow:
@@ -271,25 +263,6 @@ def _serving(ctx: Context) -> list[dict[str, Any]]:
     associated): available, or associated but with requirements unmet."""
     return [i for i in ctx.implementations if isinstance(i, dict)
             and i.get("state") in ("available", "unmet_requirements")]
-
-
-def _todo(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
-    shown = ctx.todo[-limits.open_todo:]
-    done = ctx.done_todo[-limits.done_todo:]
-    return {
-        "source": "runtime records, currently maintained by the operator (no action changes them)",
-        "meaning": ("Operational notes about concrete intermediate work. Not Kairo's purpose: "
-                    "an empty list does not mean nothing matters, and work worth doing need not "
-                    "be listed here."),
-        "open": [_todo_item(t, now) for t in shown],
-        "open_omitted": len(ctx.todo) - len(shown),
-        "recently_done": [{**_todo_item(t, now), "done": _when(t.done_at, now)} for t in done],
-    }
-
-
-def _todo_item(t: Any, now: float) -> dict[str, Any]:
-    return {"id": t.id, "description": t.description, "directive_id": t.directive_id,
-            "created": _when(t.created_at, now)}
 
 
 def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
@@ -454,7 +427,6 @@ def _open_threads(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         "work_requests_rejected": [r for r in last_rejected if r.get("op") != "action_refused"],
         # Waiting work whose own waiting time has passed.
         "work_wait_elapsed": waits_over,
-        "open_todo_items": len(ctx.todo),
     }
 
 
@@ -612,8 +584,8 @@ def _work(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         "meaning": ("Ongoing work: pursuits Kairo carries across cycles, each with an objective, "
                     "a state and a history. 'waiting' is paused until its condition or time; "
                     "'blocked' has a concrete obstacle. Completed and abandoned work is history: "
-                    "it cannot resume; a new reason means new work. Work need not have todo items "
-                    "or a directive."),
+                    "it cannot resume; a new reason means new work. Work need not have a "
+                    "directive."),
         "note": ("objective, why, strategy text, understanding (including any diagnosis of a "
                  "failure), next_step and reasons are cognition's own earlier words "
                  "(interpretation). understanding is the current synthesis of the work (what is "
@@ -671,7 +643,7 @@ def _knowledge(ctx: Context, now: float) -> dict[str, Any]:
             "source": "none",
             "items": [],
             "note": ("Kairo has no separate knowledge store yet. Everything it remembers "
-                     "persistently is in the directives, work, todo, history and open_threads "
+                     "persistently is in the directives, work, history and open_threads "
                      "sections."),
         }
     return {"source": "runtime knowledge retrieval", "items": ctx.knowledge}

@@ -57,10 +57,9 @@ class DirectiveRecordTest(WorkCase):
     def test_creating_a_directive_establishes_purpose_only(self):
         rt = self.runtime()
         rt.start()
-        before = (rt.memory.count("work"), rt.memory.count("action"), rt.memory.count("todo"))
+        before = (rt.memory.count("work"), rt.memory.count("action"))
         rt.add_directive("Improve the project", DESCRIPTION)
-        self.assertEqual((rt.memory.count("work"), rt.memory.count("action"),
-                          rt.memory.count("todo")), before)
+        self.assertEqual((rt.memory.count("work"), rt.memory.count("action")), before)
 
     def test_directives_are_never_edited_only_deactivated_and_activated(self):
         rt = self.runtime()
