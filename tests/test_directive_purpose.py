@@ -120,8 +120,10 @@ class InstructionsTest(unittest.TestCase):
         self.assertIn("test it with a harmless check (a dry run, for example) instead of "
                       "waiting for the operator", text)
 
-    def test_no_longer_than_before_the_cleanup(self):
-        self.assertLessEqual(len(INSTRUCTIONS), 7712)  # len(INSTRUCTIONS) before the cleanup
+    def test_length_is_guarded(self):
+        # 7,712 before the cleanup; 7,765 after restoring what the situation no longer
+        # explains (failure kinds aside, which the situation labels). Grow it deliberately.
+        self.assertLessEqual(len(INSTRUCTIONS), 7765)
 
 
 class UnboundImplementationsTest(ImplCase):

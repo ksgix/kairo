@@ -62,7 +62,8 @@ names the commit that introduced it.
   `capabilities.work_requests`, `external_effects`, `kairo.what`, `environment.scope`)
   moved from every situation into the instructions, once and shorter; sections keep a
   short `source` and provenance labels. `context.limits` is gone. A fresh situation is
-  about 3,500 characters instead of 10,500.
+  about 3,800 characters instead of 10,500. The failure kinds and how cuts, omissions and
+  redactions are marked are labelled in the situation next to their fields.
 - Instructions: an active directive that asks for improving Kairo's own code now
   authorises proactive improvement within what it describes (the "concrete observed
   reason" rule stays the default); work a directive asks for is not busywork, and when
