@@ -408,23 +408,11 @@ class EnvironmentAndCapabilitiesTest(SituationCase):
                       ["verified_automatically"], False)
 
 
-class KnowledgeTest(unittest.TestCase):
-    def ctx(self, **kw):
-        return Context(environment={}, directives=[], messages=[],
-                       runtime={"now": 1000.0}, **kw)
-
-    def test_empty_knowledge_is_explicit(self):
-        k = build_situation(self.ctx())["knowledge"]
-        self.assertEqual((k["source"], k["items"]), ("none", []))
-
-    def test_knowledge_items_are_bounded_and_redacted(self):
-        secret = "hunter2-hunter2-hunter2"
-        with mock.patch.dict(os.environ, {"DB_PASSWORD": secret}):
-            k = build_situation(self.ctx(knowledge=[
-                {"fact": f"db password is {secret}", "blob": "y" * 9000}]))["knowledge"]
-        self.assertNotIn(secret, json.dumps(k))
-        self.assertIn(MARKER, k["items"][0]["fact"])
-        self.assertLess(len(k["items"][0]["blob"]), LIMITS.text + 100)
+class NoKnowledgeSectionTest(unittest.TestCase):
+    def test_there_is_no_empty_knowledge_section(self):
+        s = build_situation(Context(environment={}, directives=[], messages=[],
+                                    runtime={"now": 1000.0}))
+        self.assertNotIn("knowledge", s)
 
 
 class BoundsTest(SituationCase):

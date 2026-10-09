@@ -48,6 +48,7 @@ names the commit that introduced it.
   write a todo item, and none was ever created. Existing `todo` records are no longer
   read. The operator protocol stays version 2; its `status` result no longer has the
   `open_todo` field.
+- The empty `knowledge` situation section and `Context.knowledge`: nothing ever filled it.
 
 ### Fixed
 

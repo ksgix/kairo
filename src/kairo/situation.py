@@ -105,7 +105,6 @@ def build_situation(context: Context, limits: Limits = LIMITS) -> dict[str, Any]
             "chat": section("history.chat", lambda: _chat(context, now, limits)),
         },
         "open_threads": section("open_threads", lambda: _open_threads(context, now, limits)),
-        "knowledge": section("knowledge", lambda: _knowledge(context, now)),
         "capabilities": section("capabilities", lambda: _capabilities(context, limits)),
     }
     if context.code and isinstance(situation["kairo"], dict):  # only when deployment is configured
@@ -635,18 +634,6 @@ def _code(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
              "state": d.get("state"), "stage": d.get("stage"), **_when(d.get("at"), now)}
             for d in (c.get("deployments") or [])[-limits.deployments:]],
     }
-
-
-def _knowledge(ctx: Context, now: float) -> dict[str, Any]:
-    if not ctx.knowledge:
-        return {
-            "source": "none",
-            "items": [],
-            "note": ("Kairo has no separate knowledge store yet. Everything it remembers "
-                     "persistently is in the directives, work, history and open_threads "
-                     "sections."),
-        }
-    return {"source": "runtime knowledge retrieval", "items": ctx.knowledge}
 
 
 def _implementations(ctx: Context, limits: Limits) -> dict[str, Any]:

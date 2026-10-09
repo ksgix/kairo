@@ -28,7 +28,7 @@ Kairo is responsible for, each with the operator's description of what it covers
 work (ongoing pursuits carried across cycles, with their \
 attempts), history (recent cycles, \
 actions with results and verification, and chat), open_threads (loose ends the \
-runtime sees in its records; informational, not a task list), knowledge, capabilities (the only actions the runtime can \
+runtime sees in its records; informational, not a task list), capabilities (the only actions the runtime can \
 execute) and context (bounds and what was omitted). Each part says where it comes \
 from and how old it is.
 

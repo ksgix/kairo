@@ -207,7 +207,6 @@ A tool that acts on another system declares it. Undeclared tools keep the plain 
 | `work` | Open work, each with its understanding, its recent attempts by strategy revision and recent changes, plus recently closed work with reason or evidence |
 | `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …) and output, and chat |
 | `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, elapsed work waits |
-| `knowledge` | Empty for now: the place where a future knowledge store plugs in |
 | `capabilities` | The actions the runtime can really execute (including available implementation tools), whether each is verified automatically, and the bounded implementation catalog with guidance |
 | `context` | Limits, redaction and truncation counts, what was trimmed, and anything unavailable |
 

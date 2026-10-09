@@ -55,9 +55,6 @@ class Context:
     counts: dict[str, int] = field(default_factory=dict)
     # The observation from the previous cycle, with "observed_at", if any.
     previous_observation: dict[str, Any] | None = None
-    # Knowledge retrieved for this cycle. The boundary for a future knowledge
-    # store; nothing fills it yet.
-    knowledge: list[dict[str, Any]] = field(default_factory=list)
     # Ongoing work records (see kairo.work): open ones and recently closed ones,
     # and each open item's most recent attempts (linked action records).
     open_work: list[dict[str, Any]] = field(default_factory=list)
