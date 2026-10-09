@@ -1,11 +1,13 @@
 // Runs the dashboard's real app.js against a live dashboard, in a minimal DOM:
-// enough to render pages, fill fields and click buttons, not a browser (no layout,
-// no CSS, no browser security model). Used by test_directive_purpose.
+// enough to render the page, fill fields and click buttons, not a browser (no layout,
+// no CSS, no browser security model). Used by test_directive_purpose and test_dashboard.
 //
 //   node dashboard_dom.mjs PORT TOKEN_FILE STEPS_JSON
 //
-// STEPS: [{"page": NAME} | {"fill": {ID: TEXT}} | {"click": BUTTON_TEXT} |
+// STEPS: [{"fill": {ID: TEXT}} | {"click": BUTTON_TEXT} | {"wait": MS} |
 //         {"snapshot": LABEL}]. Prints {"snapshots": {...}, "errors": [...]}.
+// A snapshot has the whole page's text, each panel's text by id, the form controls,
+// labels and directive cards.
 import fs from "node:fs";
 
 const [port, tokenFile, stepsJson] = process.argv.slice(2);
@@ -26,6 +28,7 @@ class El extends Node_ {
     super(); this.tagName = tag.toUpperCase(); this.children = []; this.attrs = {};
     this.listeners = {}; this.className = ""; this.hidden = false; this.value = "";
     this.open = false; this.parentElement = null; this._text = null; this.dataset = {};
+    this.style = {}; this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0;
     this.classList = {toggle: (c, on) => { this.className = on ? c : ""; }};
   }
   setAttribute(k, v) { this.attrs[k] = v; if (k === "id") this.id = v; }
@@ -49,14 +52,14 @@ class El extends Node_ {
   setSelectionRange() {}
 }
 globalThis.Node = Node_;
-const ids = {};
-for (const id of ["conn", "state", "rev", "updated", "notice", "main", "refresh"]) { ids[id] = new El("div"); ids[id].id = id; }
-const nav = [...page.matchAll(/data-page="([a-z]+)"/g)].map((m) => { const b = new El("button"); b.dataset.page = m[1]; return b; });
-const find = (pred) => { let hit = null; ids.main.walk((n) => { if (!hit && pred(n)) hit = n; }); return hit; };
+// Every element the page gives an id exists; what the code renders goes inside them.
+const ids = {}, root = new El("body");
+for (const m of page.matchAll(/<(\w+)[^>]*\sid="([\w-]+)"/g)) { ids[m[2]] = new El(m[1]); ids[m[2]].id = m[2]; root.append(ids[m[2]]); }
+const find = (pred) => { let hit = null; root.walk((n) => { if (!hit && pred(n)) hit = n; }); return hit; };
 globalThis.document = {
   hidden: false, activeElement: null,
   querySelector: () => ({content: csrf}),
-  querySelectorAll: (sel) => (sel === "#nav button" ? nav : []),
+  querySelectorAll: () => [],
   getElementById: (id) => ids[id] || find((n) => n.id === id),
   createElement: (tag) => new El(tag), createTextNode: (t) => new Text(t), addEventListener() {},
 };
@@ -66,18 +69,33 @@ globalThis.confirm = () => true;
 globalThis.alert = () => {};
 globalThis.setInterval = () => 0;
 const realFetch = fetch;
-globalThis.fetch = (path, opts = {}) => realFetch(base + path, {...opts, headers: {...(opts.headers || {}), cookie, Origin: base}});
+let inFlight = 0;
+globalThis.fetch = (path, opts = {}) => {
+  inFlight += 1;
+  return realFetch(base + path, {...opts, headers: {...(opts.headers || {}), cookie, Origin: base}})
+    .finally(() => { inFlight -= 1; });
+};
 const errors = [];
 process.on("unhandledRejection", (e) => errors.push(String(e)));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// Wait for the page to come to rest, however slow the machine: no request in
+// flight and nothing still loading, several checks in a row (at most 20 s).
+async function settle() {
+  let calm = 0;
+  for (let i = 0; i < 400 && calm < 4; i += 1) {
+    await wait(50);
+    calm = inFlight === 0 && !root.textContent.includes("Loading…") ? calm + 1 : 0;
+  }
+  if (calm < 4) errors.push("the page did not settle");
+}
 
 new Function(appJs)();  // the dashboard's own code, unmodified
-await wait(800);
+await settle();
 const snapshots = {};
 for (const step of JSON.parse(stepsJson)) {
-  if (step.page) {
-    nav.find((b) => b.dataset.page === step.page).listeners.click[0]();
-    await wait(800);
+  if (step.wait) {
+    await wait(step.wait);
+    await settle();
   } else if (step.fill) {
     for (const [id, text] of Object.entries(step.fill)) {
       const field = document.getElementById(id);
@@ -88,10 +106,10 @@ for (const step of JSON.parse(stepsJson)) {
     const button = find((n) => n.tagName === "BUTTON" && n.textContent === step.click);
     if (!button) { errors.push(`no button ${step.click}`); continue; }
     await button.listeners.click[0]();
-    await wait(600);
+    await settle();
   } else if (step.snapshot) {
     const controls = [], labels = [], cards = [];
-    ids.main.walk((n) => {
+    root.walk((n) => {
       if (n.tagName === "INPUT" || n.tagName === "TEXTAREA") {
         controls.push({tag: n.tagName.toLowerCase(), id: n.id || null, required: "required" in n.attrs,
                        maxlength: n.attrs.maxlength ?? null, placeholder: n.attrs.placeholder ?? null});
@@ -103,9 +121,10 @@ for (const step of JSON.parse(stepsJson)) {
         cards.push({heading, description, text: n.textContent});
       }
     });
-    snapshots[step.snapshot] = {controls, labels, cards, text: ids.main.textContent,
-                                header: {conn: ids.conn.textContent, notice: ids.notice.hidden ? null : ids.notice.textContent}};
+    snapshots[step.snapshot] = {controls, labels, cards, text: root.textContent,
+                                panels: Object.fromEntries(Object.entries(ids).map(([id, n]) => [id, n.textContent])),
+                                header: {state: ids["state-text"].textContent, notice: ids.notice.hidden ? null : ids.notice.textContent}};
   }
 }
-console.log(JSON.stringify({snapshots, errors}));
-process.exit(0);
+// Exit only once the whole report is written: a pipe takes large output in pieces.
+process.stdout.write(JSON.stringify({snapshots, errors}) + "\n", () => process.exit(0));

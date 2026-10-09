@@ -10,30 +10,40 @@
 <body>
 <header>
   <span class="brand">Kairo</span>
-  <span id="conn" class="badge">connecting…</span>
-  <span id="state" class="badge">state unknown</span>
-  <span id="rev" class="muted"></span>
+  <span id="state" class="pill unknown"><span class="dot" aria-hidden="true"></span><span id="state-text">connecting…</span></span>
+  <span id="rev" class="mono muted"></span>
   <span class="spacer"></span>
-  <span id="updated" class="muted"></span>
-  <button id="refresh" type="button">Refresh</button>
-  <form method="post" action="/logout"><button type="submit">Log out</button></form>
+  <span id="flash" class="muted small" role="status"></span>
+  <span id="updated" class="muted small"></span>
+  <button id="wake" type="button">Wake now</button>
+  <button id="stop" type="button" class="danger">Stop Kairo</button>
 </header>
-<nav id="nav">
-  <button type="button" data-page="overview">Overview</button>
-  <button type="button" data-page="chat">Chat</button>
-  <button type="button" data-page="directives">Directives</button>
-  <button type="button" data-page="work">Work</button>
-  <button type="button" data-page="activity">Activity</button>
-  <button type="button" data-page="context">Context</button>
-  <button type="button" data-page="system">System</button>
-</nav>
-<div id="notice" class="notice" hidden></div>
-<main id="main"></main>
+<div id="notice" class="notice" role="alert" hidden></div>
+<main id="main">
+  <section id="monitors" class="monitors" aria-label="Monitors"></section>
+  <section id="timeline" class="panel" aria-label="Runtime timeline"></section>
+  <section id="figures" class="figures" aria-label="Key figures"></section>
+  <div class="columns">
+    <div class="col side">
+      <section id="directives" class="panel" aria-label="Directives"></section>
+      <section id="work" class="panel" aria-label="Work"></section>
+    </div>
+    <div class="col wide">
+      <section id="activity" class="panel" aria-label="Activity"></section>
+    </div>
+    <div class="col side">
+      <section id="chat" class="panel" aria-label="Chat"></section>
+    </div>
+  </div>
+  <section id="system" class="panel" aria-label="System and debug"></section>
+</main>
 <footer>
-  <span class="prov fact">runtime fact</span> recorded or derived by the runtime ·
-  <span class="prov interp">cognition</span> cognition's own words, not verified ·
-  <span class="prov untrusted">untrusted content</span> printed by a program or external system ·
-  <span class="prov operator">operator</span> human input
+  <span><span class="prov fact">runtime fact</span> recorded or derived by the runtime</span>
+  <span><span class="prov interp">Kairo's words</span> cognition's own words, not verified</span>
+  <span><span class="prov untrusted">untrusted content</span> printed by a program or external system</span>
+  <span><span class="prov operator">operator</span> your input</span>
+  <span class="spacer"></span>
+  <form method="post" action="/logout"><button type="submit">Log out</button></form>
 </footer>
 <script src="/static/app.js"></script>
 </body>

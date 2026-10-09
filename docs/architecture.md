@@ -23,6 +23,7 @@ implementations and the situation model. Back to the [README](../README.md); see
 | `work.py` | Ongoing work: pursuits carried across cycles, with states, strategy revisions and runtime-validated changes |
 | `chat.py` | `Message` / `Chat`: persisted human ⇄ Kairo messages. A message wakes a sleeping runtime. |
 | `implementations.py` | Implementation packages: manifest validation, content digest, the derived catalog |
+| `history.py` | Read-only views of the runtime's records for the operator: `metrics` (totals per day, context size, work, when the runtime ran, deployments) and `activity` (what happened, newest first, paged). Never shown to cognition. |
 | `ipc.py` | The operator boundary: local Unix-socket IPC to the live runtime (reads, human input, wake, stop) and the terminal client |
 | `dashboard/` | The dashboard: a loopback HTTP adapter that turns browser requests into operator IPC requests (no state, no database, no execution) |
 | `deploy.py` | Self-deployment: immutable releases built from commits, the `runtime.deploy` action (preflight, snapshot, switch, restart) |
@@ -70,6 +71,7 @@ Without a cognition provider, Kairo observes, sleeps with the reason `no cogniti
 - **Failures:** a missing CLI, a non-zero exit, a timeout, empty or invalid output, or an invalid decision is recorded with a category. Kairo then sleeps until the next wake; the process keeps running.
 - **Authentication:** whatever the local CLI is logged in with. Kairo stores no credentials.
 - **Cycle log:** every cycle leaves a small `cycle` record with provider, result or failure category, requested action kinds, sleep choice, latency and cost.
+- **Process log:** every start and every stop leaves one small `process` record (time, reason, running release, exit code). The lifecycle record holds only the latest state, so this is the only history of when Kairo was running. A killed process records no stop: a start then follows a start, and its end is shown as not recorded.
 
 ## Ongoing work
 

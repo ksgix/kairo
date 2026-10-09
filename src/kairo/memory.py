@@ -122,6 +122,32 @@ class Memory:
                 (kind, bound)).fetchone()) for op, bound in (("<", low), (">", high)))
         return [(seq, json.loads(data)) for seq, data in rows], before, beyond
 
+    def stream(self, kinds: tuple[str, ...], limit: int, before: int | None = None
+               ) -> tuple[list[tuple[int, str, dict[str, Any]]], bool]:
+        """The last ``limit`` records of several kinds together, newest first, each
+        with its ``seq`` and kind: those before ``before`` if given. ``seq`` is one
+        counter across all kinds, so this is the order in which the records were
+        first written. Also returns whether older ones exist."""
+        marks = ", ".join("?" for _ in kinds)
+        bound = "AND seq < ?" if before is not None else ""
+        args = (*kinds, *((before,) if before is not None else ()), limit + 1)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT seq, kind, data FROM records WHERE kind IN ({marks}) {bound} "
+                "ORDER BY seq DESC LIMIT ?", args).fetchall()
+        return [(seq, kind, json.loads(data)) for seq, kind, data in rows[:limit]], \
+            len(rows) > limit
+
+    def fields(self, kind: str, paths: tuple[str, ...], limit: int) -> list[tuple[Any, ...]]:
+        """The values at ``paths`` (dotted) in the last ``limit`` records of a kind,
+        newest first, without loading whole documents: for totals over many
+        records. A missing value is None; an object or list comes back as JSON text."""
+        columns = ", ".join("json_extract(data, ?)" for _ in paths)
+        with self._lock:
+            return self._db.execute(
+                f"SELECT {columns} FROM records WHERE kind = ? ORDER BY seq DESC LIMIT ?",
+                (*(f"$.{path}" for path in paths), kind, limit)).fetchall()
+
     def count(self, kind: str) -> int:
         with self._lock:
             return self._db.execute(

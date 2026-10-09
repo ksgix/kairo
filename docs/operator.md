@@ -8,6 +8,8 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
 |---|---|---|
 | `status` | `status` | the live runtime: state, reason, identity, starts, revision, counts, last cognition result, protocol version, operations |
 | `situation` | `situation` | exactly what cognition would be shown now, computed by the live runtime |
+| `metrics` | `metrics` | totals from the runtime's records: per UTC day the cycles, model calls, failures by kind and the cost the provider reported; the size of the last context sent; work by state; when the runtime was running; the latest deployments |
+| `activity [--limit N] [--before SEQ]` | `activity` | what happened, newest first, in pages of at most 100: cycles, actions (a deployment with each stage's result) and process starts and stops. `next_before` in the answer is the `--before` of the next page |
 | `chat [--limit N] [--after SEQ]` | `chat` | the conversation, human messages and Kairo's replies, in order, with sequence numbers |
 | `message TEXT [--id ID]` | `message` | a human message: persisted, then Kairo wakes. The answer comes later, in `chat` |
 | `directives` | `directives` | all directives, active and inactive, with origin and history |
@@ -43,7 +45,7 @@ A human reaches Kairo only through IPC: the Unix socket of the live runtime, rea
   - no execute, shell or action operation (direct operation of the host is SSH, outside Kairo);
   - no Work editing (ask Kairo in a message);
   - no deployment or configuration operations;
-  - no paged action history (the situation shows recent actions);
+  - no editing or deleting of history: `metrics` and `activity` only read. Text in them is bounded and redacted like every read; the full records stay in the database;
   - no network listener: the socket is local. The [dashboard](dashboard.md) is a separate HTTP adapter over these same operations.
 
 **Protocol 2:**

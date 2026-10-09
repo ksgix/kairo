@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from kairo import deploy
+from kairo import deploy, history
 from kairo.actions import FAILED, Action, ActionResult, action_state, attempt_identity, failure_of
 from kairo.chat import Chat, Message, Sender
 from kairo.cognition import Cognition, CognitionProvider, Context, as_cognition
@@ -168,6 +168,7 @@ class Runtime:
             starts = self.identity.get("starts")
             self.identity["starts"] = (starts if isinstance(starts, int) else 0) + 1
             self.memory.put("runtime", "identity", self.identity)
+            self._note_process("started", self.reason)
             self._recover_interrupted_actions()
             self._reconcile_deployments()
 
@@ -183,6 +184,16 @@ class Runtime:
                 return f"restarted after deployment {restart_for}"
             return "started after clean stop"
         return f"recovered: previous process ended while {previous}"
+
+    def _note_process(self, event: str, reason: str, **extra: Any) -> None:
+        """One small record per start and per stop: the only history of when this
+        runtime was running (the lifecycle record holds just the latest state). A
+        process that is killed records no stop; readers see a start follow a start."""
+        deployment = self._deployment()
+        self.memory.put(history.PROCESS, uuid.uuid4().hex, redact({
+            "event": event, "at": time.time(), "reason": reason,
+            "revision": deployment.running_revision if deployment is not None else None,
+            "starts": self.identity.get("starts"), **extra}, limit=1000))
 
     def _recover_interrupted_actions(self) -> None:
         # Actions that began but never recorded a result were cut off by the
@@ -365,6 +376,8 @@ class Runtime:
                 "runtime", "lifecycle",
                 {"state": to, "reason": reason, "at": time.time(), **extra},
             )
+            if to is State.STOPPED:
+                self._note_process("stopped", reason, exit_code=self.exit_code)
             log.info("%s: %s", to, reason)
             self._cond.notify_all()
 
@@ -514,6 +527,14 @@ class Runtime:
         its runtime facts (the running release, lifecycle, records) are this
         process's own."""
         return build_situation(self.context())
+
+    def metrics(self) -> dict[str, Any]:
+        """Totals over the runtime's records, for the operator (kairo.history)."""
+        return history.metrics(self.memory, time.time(), LIMITS.budget)
+
+    def activity(self, limit: int = 50, before: int | None = None) -> dict[str, Any]:
+        """What happened, newest first, in pages (kairo.history)."""
+        return history.activity(self.memory, limit, before)
 
     def directive_list(self) -> dict[str, Any]:
         records = self.directives.all()

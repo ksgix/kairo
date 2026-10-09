@@ -39,6 +39,8 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 |---|---|
 | `GET /api/status` | `status` |
 | `GET /api/situation` | `situation` |
+| `GET /api/metrics` | `metrics` |
+| `GET /api/activity?limit=N&before=SEQ` | `activity` |
 | `GET /api/chat?limit=N&after=SEQ` | `chat` |
 | `GET /api/directives` | `directives` |
 | `POST /api/message` `{"text", "id"}` | `message` |
@@ -53,17 +55,27 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
   - `unreachable` and `permission_denied` are 503;
   - `timeout` is 504;
   - `bad_response`, `response_too_large` and `internal_error` are 502.
-- `GET /api/dashboard` describes the adapter itself (socket, expected protocol, routes).
+- `GET /api/dashboard` describes the adapter itself (socket, expected protocol, routes, the release its own code was loaded from and when it started).
 
-**Views.** All views come from these reads:
+**The page.** There is one page, laid out like a monitoring console, and everything on it comes from these reads. From top to bottom:
 
-- Overview: state, counts, last cognition result, what needs attention, recent activity.
-- Chat: send messages; a retry reuses the message id, so Kairo stores the message once.
-- Directives: each as one of Kairo's responsibilities (statement, description, state, origin, linked open work, history); add with a statement and a description; deactivate, activate.
-- Work: facts, cognition's account, attempts, recovery, unresolved external operations.
-- Activity: cycles, actions, deployments.
-- Context: the situation, section by section, as cognition sees it.
-- System: host, release, capabilities, implementations, wake and stop.
+- Top bar: state and next wake, the running release, Wake now and Stop Kairo.
+- Monitors: one tile per thing that can be wrong, each with a glyph, a word (OK, Check, Problem, Unknown) and a line of facts.
+  - Runtime: reachable, and since when this process runs.
+  - Model: the last call's result, and failed calls today.
+  - Release: the running release and its status, the previous release, and whether the development repository is ahead of it.
+  - Dashboard: whether the dashboard serves the release Kairo runs. After a deployment it does not until it is restarted, and this tile says so.
+  - Purpose: active directives. None is a Check: Kairo then acts only on messages.
+  - Needs you: unanswered messages, blocked work, actions with unknown outcome, elapsed waits, a failed last cycle.
+- Runtime timeline: when Kairo was running, stopped, or not recorded (a process that ended without recording a stop), with a mark at each deployment. It covers at most the last 14 days and starts at the first recorded start: releases before this view recorded no starts or stops.
+- Key figures: model calls per day (failed ones stacked), the cost per day as the provider reports it, the size of the last context sent against the situation budget, and work by state. The same days are available as a table.
+- Directives: each with statement, description, state, origin, linked open work and history; add with a statement and a description; deactivate, activate.
+- Work: open items with next step, facts, Kairo's account, attempts and recovery; recently closed items with their completion basis and evidence.
+- Activity: the record as a log, newest first, with filters (decisions, actions, deployments, failures) and Load earlier, which pages back through the whole record. A deployment shows each stage: build, the candidate's tests (gate), the old tests (evidence), the dry cycle (gate), snapshot, switch.
+- Chat: the conversation and the message box; a retry reuses the message id, so Kairo stores the message once.
+- System and debug (collapsed): host facts, release and repository, capabilities and implementation packages, the situation section by section as the model is shown it, and the raw status.
+
+Times are UTC. A panel is redrawn only when what it shows has changed, so scrolling, typed text and opened details survive polling. The page uses the system's own fonts and loads nothing from another origin.
 
 Every item is marked as one of four kinds:
 
@@ -72,7 +84,7 @@ Every item is marked as one of four kinds:
 - **untrusted content**: what a program or external system printed; shown only as text, in a marked box;
 - **operator**: human input.
 
-Polling reads only, every 5–15 s, pauses while the tab is hidden, and backs off up to 60 s on errors. Loading or refreshing a page never wakes Kairo: only Wake, a message or a directive change does, as over IPC.
+Polling reads only (status and chat every 5 s, activity every 15 s, the situation every 20 s, directives every 30 s, metrics every 60 s), pauses while the tab is hidden, and backs off up to 60 s on errors. A runtime older than the `metrics` and `activity` operations is shown without those panels' content, with a note. Loading or refreshing a page never wakes Kairo: only Wake, a message or a directive change does, as over IPC.
 
 **Security:**
 

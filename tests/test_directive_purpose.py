@@ -203,7 +203,7 @@ class DashboardDirectiveFlowTest(DashboardCase):
         page = js[js.index("function renderDirectives"):js.index("function attemptsTable")]
         self.assertIn('api("/api/directives", {statement: statement.value, '
                       'description: description.value})', page)
-        for shown in ("d.description", "Open work for it", "History",
+        for shown in ("x.description", "Open work for it", "History",
                       "creates no work", "reassesses with it from its next cycle",
                       "required: true"):
             self.assertIn(shown, page)
@@ -237,7 +237,7 @@ class DirectiveFormEndToEndTest(DashboardCase):
 
     def test_from_the_form_to_what_cognition_is_given(self):
         # 1. The form asks for both, and says what a directive is.
-        form = self.ui({"page": "directives"}, {"snapshot": "form"})["form"]
+        form = self.ui({"snapshot": "form"})["form"]
         controls = {c["id"]: c for c in form["controls"]}
         self.assertEqual((controls["directive"]["tag"], controls["directive"]["required"],
                           controls["directive"]["maxlength"]), ("input", True, "500"))
@@ -253,7 +253,7 @@ class DirectiveFormEndToEndTest(DashboardCase):
             self.assertIn(said, form["text"])
 
         # 2. A statement alone is refused, by the page and by the API; nothing is stored.
-        missing = self.ui({"page": "directives"}, {"fill": {"directive": "Only a statement"}},
+        missing = self.ui({"fill": {"directive": "Only a statement"}},
                           {"click": "Add directive"}, {"snapshot": "missing"})["missing"]
         self.assertIn("Both a statement and a description are needed.", missing["text"])
         self.login()
@@ -266,8 +266,7 @@ class DirectiveFormEndToEndTest(DashboardCase):
         description = ("<scope:start> " + "Worthwhile improvements to code, docs and tests, "
                        "chosen by Kairo itself. " * 50 + "<scope:end>")
         self.assertGreater(len(description), 3000)
-        created = self.ui({"page": "directives"},
-                          {"fill": {"directive": statement, "directive-description": description}},
+        created = self.ui({"fill": {"directive": statement, "directive-description": description}},
                           {"click": "Add directive"}, {"snapshot": "created"})["created"]
         [record] = self.runtime.memory.all("directive")
         self.assertEqual((record["statement"], record["description"]), (statement, description))
@@ -292,7 +291,7 @@ class DirectiveFormEndToEndTest(DashboardCase):
         # 6. Work linked to the directive shows on its card.
         did = record["id"]
         self.runtime.work.apply([create("w", "Tidy the README", directive_id=did)])
-        linked = self.ui({"page": "directives"}, {"snapshot": "linked"})["linked"]
+        linked = self.ui({"snapshot": "linked"})["linked"]
         [card] = linked["cards"]
         self.assertIn("Tidy the README", card["text"])
         self.assertEqual(self.runtime.memory.count("action"), 0)  # nothing was executed

@@ -13,6 +13,14 @@ names the commit that introduced it.
 
 ### Added
 
+- Operator views of history (`kairo.history`): the `metrics` operation (per UTC day the
+  cycles, model calls, failures by kind and reported cost; the last context size; work
+  by state; when the runtime was running; the latest deployments) and the `activity`
+  operation (cycles, actions with a deployment's stages, and process starts and stops,
+  newest first, paged). Both only read, and neither is shown to cognition.
+- A `process` record for every start and every stop of the runtime (time, reason,
+  running release, exit code): the first new record kind since `work`. Older releases
+  ignore it.
 - Pacing: failure backoff for cognition errors and a rest after stalled cycles.
 - Operator probes (`--probe NAME=COMMAND`) and quiet timer wakes.
 - Completion checks for work, and the `checked` completion basis.
@@ -38,6 +46,12 @@ names the commit that introduced it.
 
 ### Changed
 
+- Dashboard rewritten as one page, laid out like a monitoring console: monitors, a
+  runtime timeline, key figures (calls and cost per day, context size, work), directives,
+  work, the activity log with deployment stages and paging, chat, and a collapsed
+  system and debug section. The seven separate pages are gone; nothing they showed was
+  removed. The dashboard also reports which release it serves, so a dashboard left
+  running across a deployment is visible. Dark theme, system fonts, no other origin.
 - Instructions: act at the scale a request asks for, do not ask for permission that is
   not needed, keep real care for what cannot be undone, and report honestly what was
   and was not done.

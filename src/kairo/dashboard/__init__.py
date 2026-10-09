@@ -59,6 +59,8 @@ CSRF_HEADER = "X-Kairo-CSRF"
 ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/status"): "status",
     ("GET", "/api/situation"): "situation",
+    ("GET", "/api/metrics"): "metrics",
+    ("GET", "/api/activity"): "activity",
     ("GET", "/api/chat"): "chat",
     ("GET", "/api/directives"): "directives",
     ("POST", "/api/message"): "message",
@@ -68,7 +70,8 @@ ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/api/wake"): "wake",
     ("POST", "/api/stop"): "stop",
 }
-QUERY_INTS = {"chat": ("limit", "after")}  # GET query fields, passed as integers
+# GET query fields, passed as integers.
+QUERY_INTS = {"chat": ("limit", "after"), "activity": ("limit", "before")}
 
 # How IPC outcomes become HTTP statuses. Kairo's own error code is passed through.
 HTTP_STATUS = {
@@ -153,6 +156,7 @@ class Dashboard(ThreadingHTTPServer):
         self.socket_path = str(socket_path)
         self.token = token
         self.sessions = Sessions()
+        self.started_at = time.time()
         self.secure_cookie = secure_cookie
         port = self.server_address[1]
         self.allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}",
@@ -232,7 +236,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/dashboard":  # the adapter's own facts (not Kairo's)
             return self._json(200, {"ok": True, "result": {
                 "socket": self.server.socket_path, "protocol_expected": PROTOCOL,
-                "routes": sorted(f"{m} {p}" for m, p in ROUTES)}})
+                "routes": sorted(f"{m} {p}" for m, p in ROUTES),
+                # Which release's dashboard this is: it keeps serving the release it
+                # started from, so after a deployment it can be older than Kairo.
+                "revision": own_revision(), "started_at": self.server.started_at}})
         op = ROUTES.get(("GET", path))
         if op is None:
             return self._json(404, {"ok": False, "error": "not found", "code": "not_found"})
@@ -359,6 +366,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:  # path only, never a query or body
         log.info("%s %s", self.command, urlsplit(self.path).path)
+
+
+def own_revision() -> str | None:
+    """The release this dashboard's code was loaded from: the name of its release
+    directory when that is a commit id (the deployed layout), otherwise None."""
+    name = STATIC.parents[3].name
+    return name if len(name) == 40 and all(c in "0123456789abcdef" for c in name) else None
 
 
 def _failure(code: str, message: str) -> tuple[int, dict[str, Any]]:

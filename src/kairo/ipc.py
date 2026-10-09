@@ -5,6 +5,11 @@ newline, reads one JSON object terminated by a newline, and the connection close
 
     {"op": "status"}                                  live runtime status
     {"op": "situation"}                               what cognition would be shown now
+    {"op": "metrics"}                                 totals: calls and cost per day, work,
+                                                      when the runtime ran, deployments
+    {"op": "activity", "limit": 50, "before": SEQ}    what happened, newest first (both
+                                                      optional; before: the previous
+                                                      page's next_before)
     {"op": "chat", "limit": 50, "after": SEQ}         the conversation (both optional)
     {"op": "message", "text": "...", "id": "..."}     a human message (id optional:
                                                       makes delivery idempotent)
@@ -55,6 +60,7 @@ from pathlib import Path
 from typing import Any
 
 from kairo.redact import redact
+from kairo.history import ACTIVITY_PAGE
 from kairo.runtime import CHAT_PAGE, OperatorRejected, Runtime
 
 log = logging.getLogger("kairo.ipc")
@@ -70,6 +76,7 @@ WAKE_REASON = 300
 # Each operation and the request fields it accepts besides "op".
 OPS: dict[str, frozenset[str]] = {
     "status": frozenset(), "situation": frozenset(), "chat": frozenset({"limit", "after"}),
+    "metrics": frozenset(), "activity": frozenset({"limit", "before"}),
     "message": frozenset({"text", "id"}), "directives": frozenset(),
     "directive.add": frozenset({"statement", "description"}),
     "directive.deactivate": frozenset({"id"}),
@@ -244,6 +251,12 @@ class IPCServer:
                         "ops": sorted(OPS)}
             case "situation":
                 return runtime.situation()
+            case "metrics":
+                return runtime.metrics()
+            case "activity":
+                limit = _int(request, "limit", 50, 1, ACTIVITY_PAGE)
+                before = _int(request, "before", None, 1, None)
+                return runtime.activity(limit=limit, before=before)
             case "chat":
                 limit = _int(request, "limit", 50, 1, CHAT_PAGE)
                 after = _int(request, "after", None, 0, None)
@@ -341,6 +354,11 @@ def main(argv: list[str] | None = None) -> int:
     ops = parser.add_subparsers(dest="command", required=True)
     ops.add_parser("status", help="show the live runtime's state")
     ops.add_parser("situation", help="show what cognition would be shown now")
+    ops.add_parser("metrics", help="show totals: calls and cost per day, work, running time")
+    activity = ops.add_parser("activity", help="show what happened, newest first")
+    activity.add_argument("--limit", type=int, default=20, help="items to show (default: 20)")
+    activity.add_argument("--before", type=int, metavar="SEQ",
+                          help="only items before this sequence number (an earlier page)")
     chat = ops.add_parser("chat", help="show the conversation with Kairo")
     chat.add_argument("--limit", type=int, default=20, help="messages to show (default: 20)")
     chat.add_argument("--after", type=int, metavar="SEQ",
@@ -368,6 +386,10 @@ def main(argv: list[str] | None = None) -> int:
             payload["limit"] = args.limit
             if args.after is not None:
                 payload["after"] = args.after
+        case "activity":
+            payload["limit"] = args.limit
+            if args.before is not None:
+                payload["before"] = args.before
         case "message":
             payload["text"] = args.text
             if args.id:
