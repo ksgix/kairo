@@ -201,9 +201,9 @@ A tool that acts on another system declares it. Undeclared tools keep the plain 
 | `environment` | A fresh host observation and what changed since the previous one |
 | `directives` | Active directives: statement and description (the operator's words), and age, plus the number inactive |
 | `work` | Open work, each with its understanding, its recent attempts by strategy revision and recent changes, plus recently closed work with reason or evidence |
-| `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …) and output, and chat |
+| `history` | Recent cycles (cognition's earlier assessment or the runtime's failure record), actions with a runtime-derived `state` (`verified_successful`, `executed_unverified`, `interrupted`, …), output, and a `verification` entry only for a verdict or a pending deployment confirmation, and chat |
 | `open_threads` | Derived, and informational only (not a task list): unanswered messages, failed or interrupted actions, results new since the last decision, a failed previous cycle, elapsed work waits |
-| `capabilities` | The actions the runtime can really execute (including available implementation tools), whether each is verified automatically, and the bounded implementation catalog with guidance |
+| `capabilities` | The actions the runtime can really execute (including available implementation tools), `verified_automatically` on the ones that are, and the bounded implementation catalog with guidance |
 | `context` | Limits, redaction and truncation counts, what was trimmed, and anything unavailable |
 
 - **Provenance:** every section names its source, and times carry `age_seconds`. Cognition's own earlier assessments are labelled as interpretation, not fact. Missing data is shown as missing (`"unknown"`, `null`) and never invented.

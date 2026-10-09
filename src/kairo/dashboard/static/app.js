@@ -550,7 +550,7 @@
       el("thead", null, el("tr", null, ["action", "effects", "idempotency", "verified automatically"].map((h) => el("th", null, h)))),
       el("tbody", null, Object.entries(caps.actions || {}).map(([kind, spec]) => el("tr", null,
         el("td", null, kind), el("td", null, spec.effects || "—"), el("td", null, spec.idempotency || "—"),
-        el("td", null, String(spec.verified_automatically))))))),
+        el("td", null, String(spec.verified_automatically === true))))))),
       sub("Implementations"), impls.length ? el("ul", null, impls.map((i) =>
         el("li", null, `${i.id} · ${i.state}${i.reason ? " · " + i.reason : ""}${i.digest ? " · " + String(i.digest).slice(0, 12) : ""}`)))
         : el("p", {class: "muted"}, "No implementation packages configured.")));

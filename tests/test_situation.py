@@ -404,8 +404,10 @@ class EnvironmentAndCapabilitiesTest(SituationCase):
         spec = caps["actions"]["process.run"]
         self.assertEqual(spec["params"], ACTIONS["process.run"]["params"])
         self.assertIs(spec["verified_automatically"], True)
-        self.assertIs(situation_of(self.runtime())["capabilities"]["actions"]["process.run"]
-                      ["verified_automatically"], False)
+        # Only when true: a constant "false" on nearly every action says nothing.
+        self.assertNotIn("verified_automatically",
+                         situation_of(self.runtime())["capabilities"]["actions"]["process.run"])
+        self.assertNotIn("verification", caps)
 
 
 class NoKnowledgeSectionTest(unittest.TestCase):
@@ -496,6 +498,24 @@ class ActionOutputTest(unittest.TestCase):
         text = render_situation(build_situation(ctx))
         self.assertLess(len(text), 25_000)
 
+
+
+class VerificationLabelTest(unittest.TestCase):
+    def test_only_a_verdict_or_a_pending_confirmation_is_shown(self):
+        ctx = output_context([10] * 4)
+        recs = ctx.recent_actions
+        recs[0]["verification"] = {"outcome": "success", "detail": "checked"}
+        recs[1]["verification"] = {"outcome": "failure", "detail": "not met"}
+        recs[2]["verification"] = {"outcome": "unverifiable", "detail": "awaiting the successor",
+                                   "evidence": {"awaiting": "successor"}}
+        # recs[3]: "unverifiable" (no verifier), as 98 of 99 production actions were
+        items = build_situation(ctx)["history"]["actions"]["items"]
+        self.assertEqual([i.get("verification", {}).get("outcome") for i in items],
+                         ["success", "failure", "unverifiable", None])
+        self.assertEqual([i["state"] for i in items],
+                         ["verified_successful", "verified_failed", "awaiting_confirmation",
+                          "executed_unverified"])
+        self.assertNotIn("verification", items[3])
 
 
 class SecurityTest(SituationCase):

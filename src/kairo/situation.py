@@ -313,22 +313,27 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         result = rec.get("result") or {}
         output = result.get("output") or {}
         verification = rec.get("verification") or {}
-        items.append({
+        state = action_state(rec)
+        item = {
             "id": rec.get("id"),
             "kind": rec.get("kind"),
             "params": rec.get("params"),
             "purpose": rec.get("reason"),
             "requested": _when(rec.get("started_at"), now),
             "finished": _when(rec.get("finished_at"), now) if rec.get("finished_at") else None,
-            "state": action_state(rec),
+            "state": state,
             "failure": failure_of(rec),
             "returncode": output.get("returncode"),
             **_external(rec, result),
             "output": _content(rec, output, room[id(rec)]),
             "error": result.get("error"),
-            "verification": {"outcome": verification.get("outcome"),
-                             "detail": verification.get("detail")} if verification else None,
-        })
+        }
+        # Only a verdict says something: "unverifiable" is already in the state.
+        if verification.get("outcome") in ("success", "failure") \
+                or state == "awaiting_confirmation":
+            item["verification"] = {"outcome": verification.get("outcome"),
+                                    "detail": verification.get("detail")}
+        items.append(item)
     return {
         "source": "runtime action log",
         "note": ("'state' is derived by the runtime: verified_successful, verified_failed, "
@@ -683,7 +688,7 @@ def _capabilities(ctx: Context, limits: Limits = LIMITS) -> dict[str, Any]:
         "meaning": ("The only operations the runtime can execute. Cognition cannot act directly: "
                     "it requests actions in its decision, the runtime executes and records them, "
                     "and their results appear in history.actions on the next cycle."),
-        "actions": {kind: {**spec, "verified_automatically": kind in verified}
+        "actions": {kind: {**spec, **({"verified_automatically": True} if kind in verified else {})}
                     for kind, spec in ctx.available_actions.items()},
         "implementations": _implementations(ctx, limits),
         "external_effects": (
@@ -691,9 +696,6 @@ def _capabilities(ctx: Context, limits: Limits = LIMITS) -> dict[str, Any]:
             "unresolved external operation (work recovery lists them) is settled by "
             "verification, or, on an idempotent tool, resumed with 'resumes': <its action id> "
             "under the same operation key."),
-        "verification": ("Actions without an automatic verifier are recorded with outcome "
-                         "'unverifiable' even when they ran; judge the outcome from the recorded "
-                         "result or observe again."),
         "work_requests": (
             "Your decision's 'work' list asks the runtime to change ongoing work; it validates "
             "each request and reports refusals next cycle in open_threads. create: new work "

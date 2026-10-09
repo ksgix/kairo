@@ -290,7 +290,7 @@ class ClaudeInRuntimeTest(CognitionCase):
         self.assertEqual(situation["history"]["chat"]["items"][0]["text"], "anything wrong?")
         [earlier] = situation["history"]["actions"]["items"]
         self.assertEqual(earlier["output"]["stdout"], "earlier\n")
-        self.assertEqual(earlier["verification"]["outcome"], "unverifiable")
+        self.assertNotIn("verification", earlier)  # "unverifiable" says nothing the state does not
         self.assertEqual(earlier["state"], "executed_unverified")
         self.assertIn("process.run", situation["capabilities"]["actions"])
 

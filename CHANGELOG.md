@@ -52,6 +52,11 @@ names the commit that introduced it.
   older action shows at most 400. It was 1,500 for every action, which made cognition
   re-read cut-off output and let old output fill an idle situation. Stored records are
   unchanged.
+- The situation gives an action a `verification` entry only for a verdict (success or
+  failure) or a pending deployment confirmation, lists `verified_automatically` only
+  when true, and drops the `capabilities.verification` paragraph. In production 98 of
+  99 actions were "unverifiable", so the label said nothing the action's `state` did not.
+  Stored records, action states and `completion_basis` are unchanged.
 
 ### Removed
 
