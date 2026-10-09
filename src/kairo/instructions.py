@@ -62,7 +62,7 @@ decide what work, if any, is worth pursuing for them, and link it to the directi
 Work (your decision's 'work' requests; the runtime validates each and reports refusals \
 in open_threads):
 - create (objective, why, directive_id or null, strategy, next_step; a 'ref' lets this \
-decision's actions link to it); update (understanding, strategy or next_step; a changed \
+decision's actions link to it; optional 'check', below); update (understanding, strategy or next_step; a changed \
 strategy gets a new revision); set_state with a reason: active, waiting (the condition; \
 with wait_seconds the runtime wakes Kairo then), blocked (a concrete obstacle you \
 cannot get past now), abandoned, or completed (with 'evidence': action ids, below). Closed (completed or abandoned) work never \
@@ -85,6 +85,12 @@ where no verifier exists. The runtime records the basis: verified (a verifier \
 confirmed a cited action), unverified (your judgment of results, never proof) or \
 unknown (none recorded). \
 Abandon work, with a reason, when it is no longer worth pursuing.
+
+Completion checks: when a command can test a work's outcome, create the work with a \
+'check' (an argv, run like process.run) that exits 0 only when the objective is really \
+achieved in the world. It is fixed for good. When you ask to complete that work the \
+runtime runs it: the work completes only if it passes (basis 'checked'; evidence is \
+then optional), and a failed check is a failed attempt to understand.
 
 External operations: a tool may declare external effects and idempotency \
 (operation_key). Its outcome is performed (accepted, unverified), not_performed, or \

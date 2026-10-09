@@ -122,8 +122,9 @@ class InstructionsTest(unittest.TestCase):
 
     def test_length_is_guarded(self):
         # 7,712 before the cleanup; 7,765 after restoring what the situation no longer
-        # explains (failure kinds aside, which the situation labels). Grow it deliberately.
-        self.assertLessEqual(len(INSTRUCTIONS), 7765)
+        # explains (failure kinds aside, which the situation labels); then pacing, probes
+        # and completion checks, which are new behaviour. Grow it deliberately.
+        self.assertLessEqual(len(INSTRUCTIONS), 9009)
 
 
 class UnboundImplementationsTest(ImplCase):
