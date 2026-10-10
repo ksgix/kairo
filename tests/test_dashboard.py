@@ -918,9 +918,14 @@ class HistoryRouteTest(DashboardCase):
         self.fails(self.post("/api/metrics", {}), 404, "not_found")
 
     def test_the_dashboard_says_which_release_it_serves(self):
+        # Wherever this suite runs: a checkout here and in CI, a release directory in
+        # a deployment's preflight. So the code's location is always given, never assumed.
         self.ready()
-        info = self.ok("GET", "/api/dashboard")
-        self.assertIsNone(info["revision"])  # the tests run from a checkout, not a release
+        checkout = self.dir / "checkout" / "src" / "kairo" / "dashboard" / "static"
+        with mock.patch.object(dashboard, "STATIC", checkout):
+            self.assertIsNone(dashboard.own_revision())
+            info = self.ok("GET", "/api/dashboard")
+        self.assertIsNone(info["revision"])
         self.assertAlmostEqual(info["started_at"], time.time(), delta=TIMEOUT * 4)
         sha = "0123456789abcdef0123456789abcdef01234567"
         release = self.dir / "deploy" / "releases" / sha / "src" / "kairo" / "dashboard" / "static"
