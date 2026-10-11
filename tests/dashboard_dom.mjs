@@ -7,7 +7,9 @@
 // STEPS: [{"fill": {ID: TEXT}} | {"click": BUTTON_TEXT} | {"wait": MS} |
 //         {"snapshot": LABEL}]. Prints {"snapshots": {...}, "errors": [...]}.
 // A snapshot has the whole page's text, each panel's text by id, the form controls,
-// labels and directive cards.
+// labels and directive cards, the layout (which blocks sit in which zone, hidden and
+// collapsed ones, the root element's settings) and what the page stored in the browser.
+// KAIRO_DOM_STORAGE (a JSON object) is what an earlier visit left in that storage.
 import fs from "node:fs";
 
 const [port, tokenFile, stepsJson] = process.argv.slice(2);
@@ -29,12 +31,29 @@ class El extends Node_ {
     this.listeners = {}; this.className = ""; this.hidden = false; this.value = "";
     this.open = false; this.parentElement = null; this._text = null; this.dataset = {};
     this.style = {}; this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0;
-    this.classList = {toggle: (c, on) => { this.className = on ? c : ""; }};
+    const names = () => this.className.split(" ").filter(Boolean);
+    const set = (c, on) => { this.className = names().filter((x) => x !== c).concat(on ? [c] : []).join(" "); };
+    this.classList = {contains: (c) => names().includes(c), add: (c) => set(c, true), remove: (c) => set(c, false),
+                      toggle: (c, on) => set(c, on === undefined ? !names().includes(c) : on)};
   }
-  setAttribute(k, v) { this.attrs[k] = v; if (k === "id") this.id = v; }
+  setAttribute(k, v) {
+    this.attrs[k] = v;
+    if (k === "id") this.id = v;
+    if (k.startsWith("data-")) this.dataset[k.slice(5)] = v;
+  }
   addEventListener(k, f) { (this.listeners[k] = this.listeners[k] || []).push(f); }
-  append(...nodes) { for (const n of nodes) { n.parentElement = this; this.children.push(n); } }
-  replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
+  append(...nodes) {   // a node has one parent: appending it elsewhere moves it
+    for (const n of nodes) {
+      if (n.parentElement) n.parentElement.children = n.parentElement.children.filter((c) => c !== n);
+      n.parentElement = this;
+      this.children.push(n);
+    }
+  }
+  replaceChildren(...nodes) {
+    for (const c of this.children) c.parentElement = null;
+    this.children = [];
+    this.append(...nodes);
+  }
   set textContent(t) { this._text = String(t); this.children = []; }
   get textContent() {
     return this.children.length ? this.children.map((c) => c.textContent).join("") : (this._text ?? "");
@@ -56,8 +75,11 @@ globalThis.Node = Node_;
 const ids = {}, root = new El("body");
 for (const m of page.matchAll(/<(\w+)[^>]*\sid="([\w-]+)"/g)) { ids[m[2]] = new El(m[1]); ids[m[2]].id = m[2]; root.append(ids[m[2]]); }
 const find = (pred) => { let hit = null; root.walk((n) => { if (!hit && pred(n)) hit = n; }); return hit; };
+// The browser's own storage for this page, optionally with what an earlier visit left.
+const stored = new Map(Object.entries(JSON.parse(process.env.KAIRO_DOM_STORAGE || "{}")));
+globalThis.localStorage = {getItem: (k) => (stored.has(k) ? stored.get(k) : null), setItem: (k, v) => { stored.set(k, String(v)); }};
 globalThis.document = {
-  hidden: false, activeElement: null,
+  hidden: false, activeElement: null, documentElement: new El("html"),
   querySelector: () => ({content: csrf}),
   querySelectorAll: () => [],
   getElementById: (id) => ids[id] || find((n) => n.id === id),
@@ -100,7 +122,7 @@ for (const step of JSON.parse(stepsJson)) {
     for (const [id, text] of Object.entries(step.fill)) {
       const field = document.getElementById(id);
       field.value = text;
-      for (const f of field.listeners.input || []) f();
+      for (const f of [...(field.listeners.input || []), ...(field.listeners.change || [])]) f();
     }
   } else if (step.click) {
     const button = find((n) => n.tagName === "BUTTON" && n.textContent === step.click);
@@ -121,7 +143,13 @@ for (const step of JSON.parse(stepsJson)) {
         cards.push({heading, description, text: n.textContent});
       }
     });
-    snapshots[step.snapshot] = {controls, labels, cards, text: root.textContent,
+    const blocksIn = (id) => ids[id].children.filter((n) => n instanceof El && n.dataset.block).map((n) => n.dataset.block);
+    const collapsed = [];
+    root.walk((n) => { if (n.dataset.block && n.classList.contains("collapsed")) collapsed.push(n.dataset.block); });
+    const layout = {zones: {top: blocksIn("zone-top"), left: blocksIn("zone-left"), middle: blocksIn("zone-middle"),
+                            right: blocksIn("zone-right")}, hidden: blocksIn("stock"), collapsed,
+                    root: {...document.documentElement.dataset}, settingsShown: !ids.settings.hidden};
+    snapshots[step.snapshot] = {controls, labels, cards, text: root.textContent, layout, storage: Object.fromEntries(stored),
                                 panels: Object.fromEntries(Object.entries(ids).map(([id, n]) => [id, n.textContent])),
                                 header: {state: ids["state-text"].textContent, notice: ids.notice.hidden ? null : ids.notice.textContent}};
   }

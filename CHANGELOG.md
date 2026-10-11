@@ -46,6 +46,11 @@ names the commit that introduced it.
 
 ### Changed
 
+- Dashboard layout: the page fits one screen by default (each block scrolls inside
+  itself), and a Customize mode lets the reader move blocks between a top strip and
+  three columns (by dragging, or with arrows and a list), hide and collapse them, and
+  choose text size, font and density. The choices are kept in the browser only. Log out
+  moved to the top bar; the daily table and the label legend moved into System and debug.
 - Dashboard rewritten as one page, laid out like a monitoring console: monitors, a
   runtime timeline, key figures (calls and cost per day, context size, work), directives,
   work, the activity log with deployment stages and paging, chat, and a collapsed

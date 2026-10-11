@@ -739,7 +739,12 @@ class ContentTest(DashboardCase):
             self.assertNotIn(forbidden, js)
         self.assertIn("document.createTextNode", js)
         self.assertNotRegex(js, r"https?://")           # no other origin is contacted
-        self.assertNotRegex(js, r"localStorage|sessionStorage|indexedDB")  # holds no Kairo state
+        # The browser keeps one thing for the page: the reader's own layout choices
+        # (LayoutTest checks what is in it). Nothing read from Kairo is stored.
+        self.assertNotRegex(js, r"sessionStorage|indexedDB|document\.cookie")
+        self.assertEqual(re.findall(r"localStorage\.\w+\([^)]*\)", js),
+                         ["localStorage.getItem(PREFS_KEY)",
+                          "localStorage.setItem(PREFS_KEY, JSON.stringify(P)"])
         for name in ["index.html", "login.html"]:
             html = (STATIC / name).read_text()
             self.assertNotRegex(html, r"<script>|\son\w+=|style=")   # CSP: no inline code
@@ -991,7 +996,7 @@ class OnePageTest(DashboardCase):
                            ("monitors", "Nothing waiting"), ("monitors", "not from a release"),
                            ("timeline", "Running 100.0%"), ("figures", "Model calls per day"),
                            ("figures", "No model call has reported its context size yet."),
-                           ("figures", "Daily figures as a table"),
+                           ("system", "Daily figures as a table"), ("system", "What the labels mean"),
                            ("directives", "No directives yet"), ("work", "Tidy the README"),
                            ("activity", "DECISION"), ("activity", "ACTION"), ("activity", "START"),
                            ("activity", "1 action, 1 reply · stayed awake"),
@@ -1068,6 +1073,124 @@ class OnePageTest(DashboardCase):
         self.assertIn("Running, asleep", panels["monitors"])   # everything else still works
         self.assertIn("No messages yet.", panels["chat"])
         self.assertIsNone(self.ui({"snapshot": "x"})["x"]["header"]["notice"])
+
+
+DEFAULT_ZONES = {"top": ["monitors", "timeline", "figures"],
+                 "left": ["directives", "work", "system"], "middle": ["activity"], "right": ["chat"]}
+PREFS_KEY = "kairo.dashboard.layout"
+
+
+@unittest.skipUnless(shutil.which("node"), "needs node to run the dashboard's own app.js")
+class LayoutTest(DashboardCase):
+    """The reader's own arrangement of the page: blocks moved, hidden and collapsed,
+    font, text size, density, fit to screen. View state in the browser, nothing more."""
+
+    def setUp(self):
+        super().setUp()
+        self.runtime = self.launch(Cognition(always_sleep))
+        self.serve()
+
+    def ui(self, *steps, storage=None):
+        env = {**os.environ, "KAIRO_DOM_STORAGE": json.dumps(storage or {})}
+        out = subprocess.run(["node", str(HARNESS), str(self.port), str(self.token_file),
+                              json.dumps(list(steps))], capture_output=True, text=True,
+                             timeout=60, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        result = json.loads(out.stdout)
+        self.assertEqual(result["errors"], [])
+        return result["snapshots"]
+
+    def test_the_default_is_one_screen_and_stores_nothing(self):
+        shot = self.ui({"snapshot": "s"})["s"]
+        layout = shot["layout"]
+        self.assertEqual(layout["zones"], DEFAULT_ZONES)
+        self.assertEqual((layout["hidden"], layout["collapsed"]), ([], ["system"]))
+        self.assertEqual(layout["root"], {"layout": "fit", "size": "medium", "font": "sans",
+                                          "density": "compact", "customizing": "false"})
+        self.assertFalse(layout["settingsShown"])
+        self.assertEqual(shot["storage"], {})  # nothing is stored until the reader changes something
+        self.assertIn("Running, asleep", shot["panels"]["monitors"])  # blocks render where they sit
+
+    def test_blocks_move_hide_and_collapse_and_the_choices_are_kept(self):
+        shots = self.ui(
+            {"click": "Customize"}, {"snapshot": "open"},
+            {"fill": {"where-chat": "left"}},     # the list on a block: which zone
+            {"click": "Hide"},                    # the first block's: Monitors
+            {"click": "↓"},                       # now the first block's: Runtime timeline
+            {"click": "Collapse"},                # and now Key figures is first
+            {"click": "Large"}, {"click": "Mono"}, {"click": "Comfortable"},
+            {"click": "Scrolling page"}, {"click": "Done"}, {"snapshot": "done"})
+        self.assertTrue(shots["open"]["layout"]["settingsShown"])
+        self.assertEqual(shots["open"]["layout"]["root"]["customizing"], "true")
+        for offered in ("Fit to screen", "Text size", "Font", "Density", "Reset layout",
+                        "kept in this browser only"):
+            self.assertIn(offered, shots["open"]["panels"]["settings"])
+        done = shots["done"]["layout"]
+        self.assertEqual(done["zones"], {"top": ["figures", "timeline"],
+                                         "left": ["directives", "work", "system", "chat"],
+                                         "middle": ["activity"], "right": []})
+        self.assertEqual((done["hidden"], sorted(done["collapsed"])),
+                         (["monitors"], ["figures", "system"]))
+        self.assertEqual(done["root"], {"layout": "scroll", "size": "large", "font": "mono",
+                                        "density": "comfortable", "customizing": "false"})
+        self.assertFalse(done["settingsShown"])
+        # What the browser keeps: one entry, the layout and nothing else.
+        self.assertEqual(list(shots["done"]["storage"]), [PREFS_KEY])
+        kept = json.loads(shots["done"]["storage"][PREFS_KEY])
+        self.assertEqual(kept, {"layout": "scroll", "size": "large", "font": "mono",
+                                "density": "comfortable", "zones": done["zones"],
+                                "hidden": ["monitors"], "collapsed": ["system", "figures"]})
+        # The next visit starts from it, and can undo it.
+        again = self.ui({"snapshot": "back"}, {"click": "Customize"}, {"click": "Show Monitors"},
+                        {"snapshot": "shown"}, {"click": "Reset layout"}, {"snapshot": "reset"},
+                        storage=shots["done"]["storage"])
+        self.assertEqual(again["back"]["layout"] | {"settingsShown": False}, done)
+        self.assertEqual(again["shown"]["layout"]["zones"]["top"],
+                         ["figures", "timeline", "monitors"])
+        self.assertEqual(again["shown"]["layout"]["hidden"], [])
+        self.assertEqual(again["reset"]["layout"]["zones"], DEFAULT_ZONES)
+        self.assertEqual(json.loads(again["reset"]["storage"][PREFS_KEY])["zones"], DEFAULT_ZONES)
+
+    def test_whatever_is_stored_the_page_still_shows_every_block(self):
+        cases = {
+            "not json": "{{{",
+            "wrong shape": json.dumps([1, 2, 3]),
+            "wrong types": json.dumps({"layout": 7, "size": "huge", "font": None, "density": [],
+                                       "zones": "all", "hidden": {}, "collapsed": 5}),
+            "strange blocks": json.dumps({
+                "font": "serif",
+                "zones": {"top": ["chat", "chat", "nonsense", 4, "__proto__"], "left": [],
+                          "middle": ["monitors"], "elsewhere": ["work"]},
+                "hidden": ["chat", "figures", "constructor"], "collapsed": ["chat", "nope"]}),
+        }
+        for name, stored in cases.items():
+            layout = self.ui({"snapshot": "s"}, storage={PREFS_KEY: stored})["s"]["layout"]
+            placed = sorted(sum(layout["zones"].values(), []) + layout["hidden"])
+            self.assertEqual(placed, sorted(sum(DEFAULT_ZONES.values(), [])), name)  # each once
+            if name != "strange blocks":
+                self.assertEqual((layout["zones"], layout["root"]["font"]), (DEFAULT_ZONES, "sans"),
+                                 name)
+        # The usable parts of a strange layout are kept; the rest falls back to the usual.
+        self.assertEqual(layout["zones"], {"top": ["timeline"], "left": ["directives", "work", "system"],
+                                           "middle": ["monitors", "activity"], "right": []})
+        self.assertEqual((layout["hidden"], layout["collapsed"], layout["root"]["font"]),
+                         (["chat", "figures"], ["chat"], "serif"))
+
+    def test_a_moved_block_still_works_and_arranging_asks_kairo_nothing(self):
+        cycles = self.runtime.memory.count("cycle")
+        shot = self.ui({"click": "Customize"}, {"fill": {"where-chat": "top"}}, {"click": "Done"},
+                       {"fill": {"msg": "Still here?"}}, {"click": "Send"}, {"snapshot": "s"})["s"]
+        self.assertEqual(shot["layout"]["zones"]["top"], ["monitors", "timeline", "figures", "chat"])
+        self.assertIn("Still here?", shot["panels"]["chat"])
+        [stored] = [m for m in self.runtime.memory.all("message") if m["sender"] == "human"]
+        self.assertEqual(stored["text"], "Still here?")
+        self.assertEqual(self.runtime.memory.count("directive"), 0)
+        self.assertGreaterEqual(self.runtime.memory.count("cycle"), cycles)
+        # The layout code only rearranges the page: it calls no route at all.
+        js = (STATIC / "app.js").read_text()
+        code = js[js.index("// -- layout"):js.index("// -- operator controls")]
+        for call in ("api(", "fetch(", "location.", "XMLHttpRequest", "sendBeacon"):
+            self.assertNotIn(call, code)
 
 
 # -- 22, 23: several browsers at once ----------------------------------------------------

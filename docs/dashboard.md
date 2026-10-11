@@ -59,7 +59,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 
 **The page.** There is one page, laid out like a monitoring console, and everything on it comes from these reads. From top to bottom:
 
-- Top bar: state and next wake, the running release, Wake now and Stop Kairo.
+- Top bar: state and next wake, the running release, Customize, Wake now, Stop Kairo and Log out.
 - Monitors: one tile per thing that can be wrong, each with a glyph, a word (OK, Check, Problem, Unknown) and a line of facts.
   - Runtime: reachable, and since when this process runs.
   - Model: the last call's result, and failed calls today.
@@ -68,14 +68,26 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
   - Purpose: active directives. None is a Check: Kairo then acts only on messages.
   - Needs you: unanswered messages, blocked work, actions with unknown outcome, elapsed waits, a failed last cycle.
 - Runtime timeline: when Kairo was running, stopped, or not recorded (a process that ended without recording a stop), with a mark at each deployment. It covers at most the last 14 days and starts at the first recorded start: releases before this view recorded no starts or stops.
-- Key figures: model calls per day (failed ones stacked), the cost per day as the provider reports it, the size of the last context sent against the situation budget, and work by state. The same days are available as a table.
+- Key figures: model calls per day (failed ones stacked), the cost per day as the provider reports it, the size of the last context sent against the situation budget, and work by state.
 - Directives: each with statement, description, state, origin, linked open work and history; add with a statement and a description; deactivate, activate.
 - Work: open items with next step, facts, Kairo's account, attempts and recovery; recently closed items with their completion basis and evidence.
 - Activity: the record as a log, newest first, with filters (decisions, actions, deployments, failures) and Load earlier, which pages back through the whole record. A deployment shows each stage: build, the candidate's tests (gate), the old tests (evidence), the dry cycle (gate), snapshot, switch.
 - Chat: the conversation and the message box; a retry reuses the message id, so Kairo stores the message once.
-- System and debug (collapsed): host facts, release and repository, capabilities and implementation packages, the situation section by section as the model is shown it, and the raw status.
+- System and debug (collapsed): the daily figures as a table, what the four labels mean, host facts, release and repository, capabilities and implementation packages, the situation section by section as the model is shown it, and the raw status.
 
 Times are UTC. A panel is redrawn only when what it shows has changed, so scrolling, typed text and opened details survive polling. The page uses the system's own fonts and loads nothing from another origin.
+
+**Layout.** The page is made of eight blocks in four zones: a top strip and three columns. The reader arranges it:
+
+- **Fit to screen** (the default): the page is exactly one screen, and each block scrolls inside itself. It applies on a screen at least 1100 by 620 pixels; on a smaller one the page scrolls. **Scrolling page** is the other choice.
+- **Customize** (top bar) shows a bar on every block and a row of settings:
+  - move a block by dragging its bar onto another block (it goes before or after it) or into a column, or with its arrows and its list of zones;
+  - hide a block, and show it again from the settings row;
+  - collapse a block to its title (also possible outside Customize, with the small button at a block's corner);
+  - text size (small, medium, large), font (sans, serif, mono) and density (compact, comfortable);
+  - Reset layout returns to the default.
+- The choices are view state. They are kept in the browser's own storage for this page (one entry, `kairo.dashboard.layout`), so each browser has its own arrangement, and clearing site data resets it. They are never sent to the dashboard or to Kairo, and nothing read from Kairo is stored in the browser.
+- What is stored is checked before use: unknown blocks and choices are dropped, and a block missing from it goes back to its usual place, so every block is always somewhere.
 
 Every item is marked as one of four kinds:
 

@@ -10,7 +10,7 @@
     status: null, situation: null, directives: null, metrics: null, dashboard: null, err: {},
     chat: [], chatMoreBefore: false, chatLimit: 50, expanded: {},
     activity: [], activityNext: null, filter: "all", loadingEarlier: false,
-    outbox: null, updated: null, drafts: {}, notes: {},
+    outbox: null, updated: null, drafts: {}, notes: {}, customizing: false,
   };
   const byId = (id) => document.getElementById(id);
 
@@ -382,7 +382,7 @@
       const step = total > 10 * 86400 ? 2 : 1;
       for (let t = (Math.floor(start / 86400) + 1) * 86400, i = 0; t < now; t += 86400, i += 1) {
         const at = (t - start) / total * 100;
-        if (at > 12 && at < 90 && i % step === 0) ticks.push(sized(el("span", null, day(t)), "left", `${at.toFixed(2)}%`));
+        if (at > 12 && at < 82 && i % step === 0) ticks.push(sized(el("span", null, day(t)), "left", `${at.toFixed(2)}%`));
       }
       return [
         el("div", {class: "timeline-head"},
@@ -453,14 +453,7 @@
         el("div", {class: "counts"}, count((states.active || 0) + (states.waiting || 0) + (states.blocked || 0), "open"),
            count(states.completed, "completed"), count(states.abandoned, "abandoned")),
         states.completed ? el("span", null, `Completions: ${basis.verified || 0} verified by the runtime, ${basis.checked || 0} by their own check, ${(basis.unverified || 0) + (basis.unknown || 0)} on Kairo's judgment`) : null);
-      const table = el("details", {class: "figure"}, el("summary", null, "Daily figures as a table"),
-        el("div", {class: "scroll"}, el("table", null,
-          el("thead", null, el("tr", null, el("th", null, "Day (UTC)"), ["Cycles", "Decided", "Failed", "Cost"].map((h) => el("th", {class: "num"}, h)), el("th", null, "Failures"))),
-          el("tbody", null, days.slice().reverse().map((x) => el("tr", null, el("td", null, x.day),
-            [num(x.cycles), num(x.decided), num(x.failed), money(x.cost_usd)].map((v) => el("td", {class: "num"}, v)),
-            el("td", null, Object.entries(x.failures).map(([k, n]) => `${n} ${k}`).join(", ") || "—")))))),
-        d.complete ? null : el("p", {class: "muted small"}, "More cycles fall inside these days than were counted: the earliest days are incomplete."));
-      return [calls, cost, context, work, table];
+      return [calls, cost, context, work];
     });
   }
 
@@ -753,12 +746,24 @@
   // -- system and debug: what the old System and Context pages held ---------------------
   function renderSystem() {
     const sit = S.situation, st = S.status;
-    const d = {sit, st, dash: S.dashboard, err: S.err.situation};
+    const d = {sit, st, dash: S.dashboard, err: S.err.situation, days: (S.metrics || {}).days, complete: (S.metrics || {}).days_complete};
     paint("system", d, () => {
-      if (!d.sit) return [head("System and debug"), errorBox(d.err, "Kairo's situation could not be read") || el("p", {class: "muted"}, "Loading…")];
+      const days = (d.days || []).slice(-WINDOW_DAYS);
+      const table = d.days ? el("details", null, el("summary", null, "Daily figures as a table"),
+        el("div", {class: "scroll"}, el("table", null,
+          el("thead", null, el("tr", null, el("th", null, "Day (UTC)"), ["Cycles", "Decided", "Failed", "Cost"].map((h) => el("th", {class: "num"}, h)), el("th", null, "Failures"))),
+          el("tbody", null, days.slice().reverse().map((x) => el("tr", null, el("td", null, x.day),
+            [num(x.cycles), num(x.decided), num(x.failed), money(x.cost_usd)].map((v) => el("td", {class: "num"}, v)),
+            el("td", null, Object.entries(x.failures).map(([k, n]) => `${n} ${k}`).join(", ") || "—")))))),
+        d.complete ? null : el("p", {class: "muted small"}, "More cycles fall inside these days than were counted: the earliest days are incomplete.")) : null;
+      const legend = el("details", null, el("summary", null, "What the labels mean"),
+        [["fact", "recorded or derived by the runtime"], ["interp", "Kairo's own words, not verified"],
+         ["untrusted", "printed by a program or external system"], ["operator", "your input"]].map(([kind, means]) =>
+          el("div", {class: "small"}, prov(kind), means)));
+      if (!d.sit) return [head("System and debug"), table, legend, errorBox(d.err, "Kairo's situation could not be read") || el("p", {class: "muted"}, "Loading…")];
       const code = (d.sit.kairo || {}).code, caps = d.sit.capabilities || {};
       const impls = (caps.implementations || {}).items || [];
-      return [head("System and debug"),
+      return [head("System and debug"), table, legend,
         el("details", null, el("summary", null, "Host, as observed at the start of the last cycle"), prov("fact"),
           kv(Object.entries((d.sit.environment || {}).facts || {}).map(([k, v]) => [k, typeof v === "object" && v !== null ? JSON.stringify(v) : String(v)]))),
         el("details", null, el("summary", null, "Release and repository"), prov("fact"),
@@ -802,6 +807,177 @@
     renderSystem();
   }
 
+  // -- layout: where each block sits and how the page reads ------------------------------
+  // The reader's own arrangement: view state only. It is kept in this browser and is
+  // never sent to the dashboard or to Kairo; nothing of Kairo's is stored here.
+  const BLOCKS = {monitors: "Monitors", timeline: "Runtime timeline", figures: "Key figures", directives: "Directives",
+                  work: "Work", activity: "Activity", chat: "Chat", system: "System and debug"};
+  const ZONES = {top: "Top", left: "Left column", middle: "Middle column", right: "Right column"};
+  const CHOICES = {layout: {fit: "Fit to screen", scroll: "Scrolling page"},
+                   size: {small: "Small", medium: "Medium", large: "Large"},
+                   font: {sans: "Sans", serif: "Serif", mono: "Mono"},
+                   density: {compact: "Compact", comfortable: "Comfortable"}};
+  const PREFS_KEY = "kairo.dashboard.layout";
+  const defaults = () => ({
+    layout: "fit", size: "medium", font: "sans", density: "compact",
+    zones: {top: ["monitors", "timeline", "figures"], left: ["directives", "work", "system"], middle: ["activity"], right: ["chat"]},
+    hidden: [], collapsed: ["system"],
+  });
+  // Whatever was stored is checked before use: unknown choices and blocks are dropped,
+  // and a block missing from it (added by a later release) goes back to its usual place.
+  function sane(stored) {
+    const p = stored && typeof stored === "object" ? stored : {}, out = defaults(), usual = defaults().zones;
+    for (const key of Object.keys(CHOICES)) if (typeof p[key] === "string" && Object.hasOwn(CHOICES[key], p[key])) out[key] = p[key];
+    const seen = new Set();
+    const blocks = (list) => (Array.isArray(list) ? list : []).filter((id) => {
+      if (typeof id !== "string" || !Object.hasOwn(BLOCKS, id) || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    if (p.zones && typeof p.zones === "object") {
+      out.hidden = blocks(p.hidden);
+      for (const zone of Object.keys(ZONES)) out.zones[zone] = blocks(p.zones[zone]);
+      for (const zone of Object.keys(ZONES)) for (const id of usual[zone]) if (!seen.has(id)) { seen.add(id); out.zones[zone].push(id); }
+    }
+    if (Array.isArray(p.collapsed)) out.collapsed = Object.keys(BLOCKS).filter((id) => p.collapsed.includes(id));
+    return out;
+  }
+  function loadPrefs() {
+    try { return sane(JSON.parse(localStorage.getItem(PREFS_KEY))); } catch (e) { return defaults(); }
+  }
+  function savePrefs() {
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(P)); } catch (e) { /* no storage: the layout lasts until the page closes */ }
+  }
+  let P = loadPrefs();
+  const zoneOf = (id) => Object.keys(ZONES).find((zone) => P.zones[zone].includes(id)) || null;
+  function take(id) {
+    for (const zone of Object.keys(ZONES)) P.zones[zone] = P.zones[zone].filter((x) => x !== id);
+    P.hidden = P.hidden.filter((x) => x !== id);
+  }
+  function place(id, zone, index) {   // into a zone, at a position (the end if none is given)
+    if (!Object.hasOwn(BLOCKS, id) || !Object.hasOwn(ZONES, zone)) return;
+    take(id);
+    const list = P.zones[zone];
+    list.splice(index === undefined ? list.length : Math.max(0, Math.min(index, list.length)), 0, id);
+    commit();
+  }
+  function shift(id, by) {
+    const zone = zoneOf(id);
+    if (zone) place(id, zone, P.zones[zone].indexOf(id) + by);
+  }
+  function hide(id) { take(id); P.hidden.push(id); commit(); }
+  function fold(id) {
+    P.collapsed = P.collapsed.includes(id) ? P.collapsed.filter((x) => x !== id) : P.collapsed.concat(id);
+    commit();
+  }
+  function choose(key, value) { P[key] = value; commit(); }
+  function commit() { savePrefs(); applyLayout(); }
+
+  const shells = {}, wheres = {}, folds = {};
+  function buildShells() {
+    for (const [id, title] of Object.entries(BLOCKS)) {
+      const tool = (text, says, act) => el("button", {type: "button", "aria-label": says, title: says, onclick: act}, text);
+      const where = el("select", {id: `where-${id}`, "aria-label": `Where ${title} sits`},
+        Object.entries(ZONES).map(([zone, name]) => el("option", {value: zone}, name)));
+      where.addEventListener("change", () => place(id, where.value));
+      folds[id] = el("button", {type: "button", onclick: () => fold(id)}, "Collapse");
+      const shell = el("div", {class: "block", "data-block": id},
+        el("div", {class: "block-bar"}, el("span", {class: "grip", "aria-hidden": true}, "⠿"),
+          el("span", {class: "block-title"}, title), el("span", {class: "spacer"}),
+          el("span", {class: "block-tools"}, tool("↑", `Move ${title} up`, () => shift(id, -1)),
+            tool("↓", `Move ${title} down`, () => shift(id, 1)), where, tool("Hide", `Hide ${title}`, () => hide(id))),
+          folds[id]),
+        byId(id),
+        el("button", {type: "button", class: "fold-quick", "aria-label": `Collapse ${title}`, title: "Collapse", onclick: () => fold(id)}, "–"));
+      shells[id] = shell;
+      wheres[id] = where;
+      wireDrag(shell, id);
+    }
+    for (const zone of Object.keys(ZONES)) wireDrop(byId(`zone-${zone}`), zone);
+  }
+  function fill(box, ids) {   // only when the order differs: moving a block resets its scrolling
+    const now = Array.from(box.children, (n) => n.dataset.block);
+    if (now.length !== ids.length || now.some((id, i) => id !== ids[i])) box.replaceChildren(...ids.map((id) => shells[id]));
+  }
+  function applyLayout() {
+    const root = document.documentElement;
+    for (const key of Object.keys(CHOICES)) root.dataset[key] = P[key];
+    root.dataset.customizing = String(S.customizing);
+    for (const zone of Object.keys(ZONES)) {
+      const box = byId(`zone-${zone}`);
+      fill(box, P.zones[zone]);
+      box.dataset.empty = String(!P.zones[zone].length);
+    }
+    fill(byId("stock"), P.hidden);
+    for (const id of Object.keys(BLOCKS)) {
+      const closed = P.collapsed.includes(id);
+      shells[id].classList.toggle("collapsed", closed);
+      shells[id].draggable = S.customizing;
+      folds[id].textContent = closed ? "Expand" : "Collapse";
+      folds[id].setAttribute("aria-expanded", String(!closed));
+      wheres[id].value = zoneOf(id) || "";
+    }
+    renderSettings();
+  }
+  function renderSettings() {
+    const box = byId("settings"), button = byId("customize");
+    box.hidden = !S.customizing;
+    button.textContent = S.customizing ? "Done" : "Customize";
+    button.setAttribute("aria-pressed", String(S.customizing));
+    if (!S.customizing) { box.replaceChildren(); return; }
+    const group = (name, key) => el("div", {class: "setting", role: "group", "aria-label": name}, el("span", {class: "setting-name"}, name),
+      Object.entries(CHOICES[key]).map(([value, text]) => el("button", {type: "button", "aria-pressed": String(P[key] === value), onclick: () => choose(key, value)}, text)));
+    const usual = defaults().zones;
+    box.replaceChildren(...[group("Layout", "layout"), group("Text size", "size"), group("Font", "font"), group("Density", "density"),
+      P.hidden.length ? el("div", {class: "setting"}, el("span", {class: "setting-name"}, "Hidden"),
+        P.hidden.map((id) => el("button", {type: "button", onclick: () => place(id, Object.keys(ZONES).find((zone) => usual[zone].includes(id)))}, `Show ${BLOCKS[id]}`))) : null,
+      el("div", {class: "setting"}, el("button", {type: "button", onclick: () => { P = defaults(); commit(); }}, "Reset layout")),
+      el("p", {class: "hint"}, "Drag a block by its bar to move it, or use its arrows and list. Fit to screen applies on screens wide and tall enough; elsewhere the page scrolls. These choices are kept in this browser only."),
+    ].filter(Boolean));
+  }
+  // Dragging (in Customize mode): drop on a block to go before or after it, or on a
+  // column to go to its end.
+  let dragged = null;
+  const unmark = () => {
+    for (const shell of Object.values(shells)) for (const c of ["drop-before", "drop-after", "sideways"]) shell.classList.remove(c);
+    for (const zone of Object.keys(ZONES)) byId(`zone-${zone}`).classList.remove("drop-into");
+  };
+  function side(e, shell) {   // which half of the block the pointer is over
+    const r = shell.getBoundingClientRect(), across = r.width < shell.parentElement.getBoundingClientRect().width * 0.9;
+    return {across, after: across ? e.clientX > r.left + r.width / 2 : e.clientY > r.top + r.height / 2};
+  }
+  function wireDrag(shell, id) {
+    shell.addEventListener("dragstart", (e) => {
+      if (!S.customizing) { e.preventDefault(); return; }
+      dragged = id;
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", id);
+      shell.classList.add("dragging");
+    });
+    shell.addEventListener("dragend", () => { dragged = null; shell.classList.remove("dragging"); unmark(); });
+    shell.addEventListener("dragover", (e) => {
+      if (!dragged || dragged === id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const at = side(e, shell);
+      unmark();
+      shell.classList.add(at.after ? "drop-after" : "drop-before");
+      if (at.across) shell.classList.add("sideways");
+    });
+    shell.addEventListener("drop", (e) => {
+      if (!dragged || dragged === id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const moving = dragged, zone = zoneOf(id), after = side(e, shell).after;
+      unmark();
+      if (zone) place(moving, zone, P.zones[zone].filter((x) => x !== moving).indexOf(id) + (after ? 1 : 0));
+    });
+  }
+  function wireDrop(box, zone) {
+    box.addEventListener("dragover", (e) => { if (dragged) { e.preventDefault(); unmark(); box.classList.add("drop-into"); } });
+    box.addEventListener("drop", (e) => { if (dragged) { e.preventDefault(); const moving = dragged; unmark(); place(moving, zone); } });
+  }
+
   // -- operator controls ----------------------------------------------------------------
   // Wake asks Kairo to reassess now; it is not a command to do anything. Stop ends the
   // runtime gracefully; under the supervisor a stop stays stopped.
@@ -818,7 +994,10 @@
     await tick(true);
     render();
   });
+  byId("customize").addEventListener("click", () => { S.customizing = !S.customizing; applyLayout(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(true); });
+  buildShells();
+  applyLayout();
   render();
   tick(true);
   setInterval(() => tick(false), 1000);
