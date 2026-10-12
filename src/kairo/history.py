@@ -26,6 +26,7 @@ from typing import Any
 from kairo.actions import action_state, failure_of
 from kairo.memory import Memory
 from kairo.redact import head_tail, redact
+from kairo.instructions import PROMPT_HEAD
 from kairo.situation import _content, _external
 
 DEPLOY_KIND = "runtime.deploy"  # kairo.deploy.KIND (not imported: deploy imports the runtime's parts)
@@ -111,10 +112,12 @@ def _days(memory: Memory, now: float) -> dict[str, Any]:
 
 
 def _last_context(memory: Memory, budget: int) -> dict[str, Any] | None:
-    """The size of the last context a provider reported receiving."""
+    """The size of the last situation a provider was sent, comparable with the budget.
+    Providers report the length of the whole prompt, which starts with PROMPT_HEAD."""
     for at, chars in memory.fields("cycle", ("at", "cognition.meta.situation_chars"), 50):
         if _is_number(chars):
-            return {"at": at if _is_number(at) else None, "chars": chars, "budget": budget}
+            return {"at": at if _is_number(at) else None,
+                    "chars": max(0, chars - len(PROMPT_HEAD)), "budget": budget}
     return None
 
 

@@ -51,7 +51,7 @@ from kairo.registry import PROVIDERS, build_cognition
 from kairo.ipc import DEFAULT_SOCKET, IPCError, IPCServer
 from kairo.memory import DatabaseLocked, Memory, lock_database
 from kairo.runtime import Runtime
-from kairo.situation import build_situation, render_situation
+from kairo.situation import build_situation
 
 DEFAULT_DB = Path(os.environ.get("KAIRO_DB", Path.home() / ".local/share/kairo/kairo.db"))
 
@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.situation:  # no runtime is running: a preview, then release the lock
             runtime = Runtime(memory, environment, cognition=cognition,
                               reassess_after=args.reassess or None)
-            print(render_situation(build_situation(runtime.context())))
+            print(json.dumps(build_situation(runtime.context()), indent=1, ensure_ascii=False))
             os.close(lock)
             return 0
         if args.run:
@@ -219,7 +219,7 @@ def _live_situation(socket_path: Path, db: Path) -> int:
     if not response.get("ok"):
         print(f"kairo: the running Kairo refused: {response.get('error')}", file=sys.stderr)
         return 1
-    print(render_situation(response["result"]))
+    print(json.dumps(response["result"], indent=1, ensure_ascii=False))
     return 0
 
 

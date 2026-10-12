@@ -400,7 +400,7 @@ class CliWithClaudeTest(unittest.TestCase):
                                  [("human", "hello"), ("kairo", "Hello, human.")])
             finally:
                 memory.close()
-            self.assertIn('"text": "hello"', fake.calls()[1]["stdin"])
+            self.assertIn('"text":"hello"', fake.calls()[1]["stdin"])
 
 
 if __name__ == "__main__":

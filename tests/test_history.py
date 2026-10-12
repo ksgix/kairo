@@ -19,6 +19,7 @@ from unittest import mock
 
 from kairo import Action, Decision, Memory, Runtime, State, deploy, history
 from kairo.cognition import CognitionError
+from kairo.instructions import PROMPT_HEAD
 from kairo.ipc import OPS, IPCServer, request
 from kairo.redact import MARKER, protect_env
 from kairo.situation import LIMITS, build_situation, render_situation
@@ -147,7 +148,7 @@ class ProcessRecordTest(Case):
         context = rt.context()
         self.assertNotIn("process", context.counts)
         self.assertNotIn('"process"', render_situation(build_situation(context)).replace(
-            '"process": {', ""))  # now.process (this process's start) is the only mention
+            '"process":{', ""))  # now.process (this process's start) is the only mention
         fingerprint = rt._fingerprint(context)
         rt._note_process("started", "another")
         self.assertEqual(rt._fingerprint(rt.context()), fingerprint)
@@ -182,7 +183,9 @@ class MetricsTest(Case):
                                  "cost_usd": 0.75, "costed": 2})
         self.assertEqual((second["cycles"], second["calls"], second["cost_usd"], second["costed"]),
                          (1, 1, 0.125, 1))
-        self.assertEqual(m["last_context"], {"at": today, "chars": 59_850, "budget": 60_000})
+        # The provider reports the whole prompt; the situation is that less PROMPT_HEAD.
+        self.assertEqual(m["last_context"], {"at": today, "chars": 59_850 - len(PROMPT_HEAD),
+                                             "budget": 60_000})
 
     def test_days_run_to_today_without_gaps_and_stop_at_the_window(self):
         now = 20_000 * DAY + 100

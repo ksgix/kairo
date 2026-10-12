@@ -171,9 +171,12 @@ class CognitionRequest:
         return json.dumps(self.schema)
 
 
+PROMPT_HEAD = "Kairo situation:\n"  # what precedes the situation in the prompt
+
+
 def cognition_request(context: Context) -> CognitionRequest:
     return CognitionRequest(
         instructions=INSTRUCTIONS,
-        prompt="Kairo situation:\n" + render_situation(build_situation(context)),
+        prompt=PROMPT_HEAD + render_situation(build_situation(context)),
         schema=decision_schema(context.available_actions),
     )

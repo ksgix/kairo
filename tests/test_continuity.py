@@ -214,12 +214,14 @@ class BoundedSituationTest(WorkCase):
             wid = rt.work.apply([create(f"w{i}", f"Objective {i}")]).refs[f"w{i}"]
             rt.work.apply([update(wid, understanding=synthesis(f"u{i}", LIMIT))])
             rt.act(Action("process.run", {"argv": ["false"]}, reason="r" * 200, work_id=wid))
-        for i in range(LIMITS.actions):
+        # More of each kind than the situation shows (15, 20, 10: the counts before
+        # history was shortened with age), so every bounded list is full.
+        for i in range(15):
             rt.act(Action("process.run", {"argv": ["python3", "-c", "print('o' * 3000)"]},
                           reason=f"look {i}"))
-        for i in range(LIMITS.messages):
+        for i in range(20):
             rt.chat.post(Sender.HUMAN if i % 2 else Sender.KAIRO, f"msg{i} " + "c" * 3000)
-        for i in range(LIMITS.cycles):
+        for i in range(10):
             rt.memory.put("cycle", f"c{i}", {"at": 1.0 + i, "note": "n" * 1000,
                                               "cognition": {"result": "decided"}})
         return rt
@@ -254,8 +256,11 @@ class BoundedSituationTest(WorkCase):
         self.assertEqual(again["work"]["open"], s["work"]["open"])  # deterministic
 
     def test_a_busy_situation_keeps_recent_history_and_shortens_long_texts_first(self):
-        rt = self.busy_runtime(works=3, directives=2)
-        s = build_situation(rt.context())
+        rt = self.busy_runtime(works=5, directives=2)  # 3 were enough before compact rendering
+        # Every history item shown whole, as before history was shortened with age, so
+        # that the budget is what cuts here, in its order.
+        limits = Limits(messages=20, actions=15, cycles=10, messages_full=20, actions_recent=15, action_recent=10**6, cycles_full=10)
+        s = build_situation(rt.context(), limits)
         size = len(render_situation({k: v for k, v in s.items() if k != "context"}))
         self.assertLessEqual(size, LIMITS.budget)
         for kind in ("actions", "chat", "cycles"):  # the newest of each kind survive

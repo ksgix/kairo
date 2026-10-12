@@ -238,7 +238,15 @@ A tool that acts on another system declares it. Undeclared tools keep the plain 
 | `context` | How cuts, omissions and redactions are marked, the redaction and truncation counts, what was trimmed, and anything unavailable |
 
 - **Provenance:** every section names its source in a few words, and times carry `age_seconds`. Cognition's own earlier words are labelled as interpretation and program output as untrusted. Explanations that never change (what each section means, the action states, the work requests) are in the instructions, sent once, not repeated in every situation, which keeps a fresh situation under 6,000 characters. Missing data is shown as missing (`"unknown"`, `null`) and never invented.
-- **Bounds:** the most recent 10 cycles, 15 actions and 20 messages; action output per stream up to 6,000 characters for new results (24,000 together) and 400 for older ones, every cut marked; 2,000 characters per other string; and a 60,000-character total budget. Every omission is counted.
+- **Bounds:** the most recent 6 cycles, 10 actions and 12 messages, shown shorter as they age, every cut marked:
+  - an action result new since the last decision is shown in full: output up to 6,000 characters per stream (24,000 together);
+  - the 3 newest other actions keep 400 characters of each string of their request, purpose and error, and of each output stream; older ones keep 160. Every action keeps its facts (id, state, failure, exit code, times);
+  - the 3 newest cycles keep their assessment (600 characters), older ones 160;
+  - the 6 newest messages are whole (up to 2,000 characters), older ones keep 500, redacted before the cut;
+  - a deployment shows each stage (role, verdict, tests run) as facts, and what each stage printed as untrusted output;
+  - work and directives are never shortened by age: work understanding is Kairo's long memory.
+
+  Then 2,000 characters per other string, and a 60,000-character total budget, which drops the oldest history first. Every omission is counted. The situation is sent as compact JSON (no indentation). On a history shaped like production's (`tests/production_shape.py`) a quiet wake sends about 35,000 characters instead of filling the budget.
   - Two long texts have their own bounds instead of the 2,000-character cap: work understanding (up to 10,000 per item, 20,000 across open work; active and most recently updated work first, every item keeping at least 1,000) and directive descriptions (up to 4,000 each, 12,000 together, at least 500 each). Shortening keeps the beginning and the end and is marked (`understanding_shortened`, `description_shortened`).
   - Over budget, the oldest history goes first, down to the newest 5 of each kind; then the longest long texts are shortened toward their floors; only then does the rest of the history go. Work facts (states, attempts, recovery, strategy revisions) are never trimmed.
 - **Robustness:** a corrupt record is reported as unavailable and does not stop the cycle.

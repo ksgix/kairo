@@ -46,6 +46,18 @@ names the commit that introduced it.
 
 ### Changed
 
+- Smaller context on quiet wakes. History is shown shorter as it ages (new results in
+  full; the 3 newest other actions cut to 400 characters per string, older ones to 160;
+  older cycle assessments to 160; older chat messages to 500), fewer items are gathered
+  (10 actions, 6 cycles, 12 messages), and the situation is sent as compact JSON. On a
+  history shaped like production's, a quiet wake sends about 35,000 characters instead
+  of 60,000. Work and directives are unchanged.
+- Kairo sees a deployment's stages in its situation: each stage's role and verdict, and
+  what it printed (untrusted). Before, a deployment showed no output at all.
+- The dashboard's context meter compares the situation with its budget (the prompt's
+  short heading is no longer counted).
+- `test_deploy` waits until a live runtime has started, not merely opened its socket;
+  the race could refuse a deployment at random.
 - Dashboard layout: the page fits one screen by default (each block scrolls inside
   itself), and a Customize mode lets the reader move blocks between a top strip and
   three columns (by dragging, or with arrows and a list), hide and collapse them, and

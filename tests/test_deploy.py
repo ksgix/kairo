@@ -33,6 +33,7 @@ from kairo.cognition import CognitionError
 from kairo.deploy import Deployment, _remove, _replace_link
 from kairo.directives import Directive
 from kairo.environment import ACTIONS
+from kairo.ipc import IPCError, request as ipc_request
 from kairo.implementations import Implementations
 from kairo.memory import DatabaseLocked, from_record, lock_database
 from kairo.redact import protect_env, redact
@@ -355,11 +356,18 @@ class LockTest(unittest.TestCase):
                                 env=_env(PACKAGE.parent), stderr=subprocess.PIPE, text=True)
         self.addCleanup(proc.stderr.close)  # registered first, so it runs after kill/wait
         self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
-        deadline = time.monotonic() + 15
-        while not (self.dir / "k.sock").exists():
+        # Ready means started, not merely listening: the socket opens before the runtime
+        # has recovered interrupted actions, and a test that writes an action in between
+        # would see it marked interrupted. Its first sleep comes after that recovery.
+        deadline = time.monotonic() + 30
+        while True:
             self.assertLess(time.monotonic(), deadline, "runtime did not start")
+            try:
+                if ipc_request(self.dir / "k.sock", {"op": "status"})["result"]["state"] == "sleeping":
+                    return proc
+            except (OSError, ValueError, KeyError, IPCError):
+                pass
             time.sleep(0.05)
-        return proc
 
     def once(self, db):
         return subprocess.run(kairo_cmd("--db", str(db)), env=_env(PACKAGE.parent),

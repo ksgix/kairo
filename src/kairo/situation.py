@@ -44,9 +44,9 @@ class Limits:
     """Selection rules and size bounds. Lists keep the most recent items."""
 
     directives: int = 20
-    messages: int = 20
-    actions: int = 15
-    cycles: int = 10
+    messages: int = 12
+    actions: int = 10
+    cycles: int = 6
     text: int = 2000           # characters per string, anywhere
     # Output of actions, per stream (stdout, stderr), beginning and end kept: results
     # new since the last decision up to ``action_output_new`` each and
@@ -56,6 +56,17 @@ class Limits:
     action_output_new_total: int = 24_000
     action_output_old: int = 400
     assessment: int = 600      # characters of an earlier cycle's assessment
+    # History is shown shorter as it ages. A result new since the last decision is shown
+    # in full; the newest other actions with their words cut to action_recent; the rest
+    # to action_older. Every item keeps its facts (id, state, failure, exit, times), and
+    # every cut is marked. So a quiet wake costs little and a busy one sees its results.
+    actions_recent: int = 3        # newest actions (besides new results) cut to action_recent
+    action_recent: int = 400       # characters of each string of their request, purpose, error
+    action_older: int = 160        # the same for older actions, and each output stream
+    cycles_full: int = 3           # newest cycles whose assessment is shown in full
+    assessment_older: int = 160    # characters of an older cycle's assessment
+    messages_full: int = 6         # newest chat messages shown in full
+    message_older: int = 500       # characters of an older chat message
     work_open: int = 8         # open work items (most recently updated)
     work_closed: int = 5       # recently completed or abandoned work items
     work_attempts: int = 4     # recent attempts shown per open work item
@@ -142,8 +153,9 @@ def build_situation(context: Context, limits: Limits = LIMITS) -> dict[str, Any]
 
 
 def render_situation(situation: dict[str, Any]) -> str:
-    """Deterministic text form of a situation, for providers and inspection."""
-    return json.dumps(situation, indent=1, ensure_ascii=False)
+    """Deterministic text form of a situation, for providers: compact JSON (no
+    indentation, which would cost about a tenth of the budget and say nothing)."""
+    return json.dumps(situation, ensure_ascii=False, separators=(",", ":"))
 
 
 # -- sections ----------------------------------------------------------------
@@ -254,7 +266,9 @@ def _directives(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
 
 def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
     items = []
-    for rec in ctx.recent_cycles[-limits.cycles:]:
+    shown = ctx.recent_cycles[-limits.cycles:]
+    for index, rec in enumerate(shown):
+        older = index < len(shown) - limits.cycles_full
         cog = rec.get("cognition") or {}
         item: dict[str, Any] = {
             "ended": _when(rec.get("at"), now),
@@ -266,7 +280,7 @@ def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         }
         if cog.get("result") == "failed":
             item["failure"] = cog.get("failure")
-            item["failure_detail"] = rec.get("note")  # written by the runtime: a fact
+            item["failure_detail"] = _cap(rec.get("note"), limits.failure_detail)  # a runtime fact
             item["providers_tried"] = [{"provider": a.get("provider"), "outcome": a.get("outcome")}
                                        for a in cog.get("attempts") or [] if isinstance(a, dict)]
             if cog.get("consecutive_failures"):  # runtime pacing: the retry backs off
@@ -277,7 +291,8 @@ def _cycles(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             item["replies"] = cog.get("replies")
             item["chose_sleep"] = cog.get("sleep")
             item["wake_after_seconds"] = cog.get("wake_after")
-            item["assessment"] = _cap(rec.get("note"), limits.assessment)
+            item["assessment"] = _cap(rec.get("note"),
+                                      limits.assessment_older if older else limits.assessment)
             work = cog.get("work") or {}
             if work:
                 item["work_applied"] = work.get("applied") or []
@@ -306,8 +321,16 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
                              (output.get("stdout"), output.get("stderr")) if isinstance(t, str))
         else:
             room[id(rec)] = limits.action_output_old
+    fresh = {id(rec) for rec in shown if rec.get("id") in new}
+    recent = {id(rec) for rec in [r for r in shown if id(r) not in fresh][-limits.actions_recent:]}
+    words = {id(rec): None if id(rec) in fresh else
+             limits.action_recent if id(rec) in recent else limits.action_older for rec in shown}
+    for rec in shown:
+        if id(rec) not in fresh and id(rec) not in recent:
+            room[id(rec)] = min(room[id(rec)], limits.action_older)
     items = []
     for rec in shown:
+        cut = words[id(rec)]
         result = rec.get("result") or {}
         output = result.get("output") or {}
         verification = rec.get("verification") or {}
@@ -315,8 +338,8 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         item = {
             "id": rec.get("id"),
             "kind": rec.get("kind"),
-            "params": rec.get("params"),
-            "purpose": rec.get("reason"),
+            "params": rec.get("params") if cut is None else _cap_strings(rec.get("params"), cut),
+            "purpose": rec.get("reason") if cut is None else _cap(rec.get("reason"), cut),
             "requested": _when(rec.get("started_at"), now),
             "finished": _when(rec.get("finished_at"), now) if rec.get("finished_at") else None,
             "state": state,
@@ -324,8 +347,10 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
             "returncode": output.get("returncode"),
             **_external(rec, result),
             "output": _content(rec, output, room[id(rec)]),
-            "error": result.get("error"),
+            "error": result.get("error") if cut is None else _cap(result.get("error"), cut),
         }
+        if rec.get("kind") == "runtime.deploy" and isinstance(output.get("stages"), list):
+            item["deploy"], item["output"] = _deployment(rec, output, min(cut or STAGE_PRINTED, STAGE_PRINTED))
         # Only a verdict says something: "unverifiable" is already in the state.
         if verification.get("outcome") in ("success", "failure") \
                 or state == "awaiting_confirmation":
@@ -341,6 +366,32 @@ def _actions(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
         "items": items,
         "omitted_older": _omitted(ctx.counts.get("action"), len(items)),
     }
+
+
+STAGE_PRINTED = 300  # characters of what one deployment stage printed (its end)
+
+
+def _deployment(rec: dict[str, Any], output: dict[str, Any], limit: int
+                ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """A deployment's own account, as runtime facts: each stage with its role and
+    verdict, and where it stopped. What each test run printed (its summary line, or
+    the end of a failure) is program content, kept apart as untrusted output."""
+    stages = [s for s in output["stages"] if isinstance(s, dict)]
+    facts = {
+        "from": output.get("from"), "to": output.get("to"), "switched": output.get("switched"),
+        "stopped_at_stage": None if output.get("switched") else output.get("stage"),
+        "files_changed": output.get("files_changed"),
+        "trust_critical_changed": output.get("trust_critical_changed"),
+        "stages": [{k: s.get(k) for k in ("stage", "role", "passed", "tests_run", "skipped",
+                                           "returncode") if s.get(k) is not None}
+                   for s in stages],
+    }
+    printed = {s.get("stage"): head_tail(s["summary"], limit) for s in stages
+               if isinstance(s.get("summary"), str) and s["summary"]}
+    if output.get("error"):
+        printed["error"] = head_tail(str(output["error"]), limit)
+    return facts, ({"trust": "untrusted", "source": "runtime.deploy (what each stage printed)",
+                    **printed} if printed else None)
 
 
 def _external(rec: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -371,8 +422,12 @@ def _content(rec: dict[str, Any], output: dict[str, Any], limit: int) -> dict[st
 
 
 def _chat(ctx: Context, now: float, limits: Limits) -> dict[str, Any]:
-    items = [{**_when(m.at, now), "id": m.id, "from": m.sender, "text": m.text}
-             for m in ctx.messages[-limits.messages:]]
+    shown = ctx.messages[-limits.messages:]
+    # Redacted before an older message is cut, so no secret is split by the cut.
+    items = [{**_when(m.at, now), "id": m.id, "from": m.sender,
+              "text": m.text if i >= len(shown) - limits.messages_full
+              else _cap(redact(m.text), limits.message_older)}
+             for i, m in enumerate(shown)]
     return {
         "source": "chat log between the human operator and Kairo",
         "note": "'kairo' messages: your earlier claims, not verified fact",

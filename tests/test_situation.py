@@ -283,7 +283,11 @@ class ReviewRegressionTest(SituationCase):
                        for i in range(15)]
         s = build_situation(Context(environment={}, directives=[], messages=old_chat,
                                     recent_actions=new_actions, runtime={"now": 3000.0}),
-                            Limits(budget=42_000, action_output_old=1500))  # outputs shown whole
+                            # Every item shown whole, as before history was shortened with
+                            # age, so that the budget is what cuts here.
+                            Limits(budget=30_000, action_output_old=1500, messages=20,
+                                   messages_full=20, actions=15, actions_recent=15,
+                                   action_recent=10**6))
         self.assertGreater(s["context"]["trimmed_for_budget"], 0)
         # The oldest go first, across kinds, but each kind keeps its newest
         # history_keep items: the operator's latest messages are never all lost
@@ -293,7 +297,7 @@ class ReviewRegressionTest(SituationCase):
         kept = [a["id"] for a in s["history"]["actions"]["items"]]
         self.assertEqual(kept, [f"a{i}" for i in range(15 - len(kept), 15)])  # newest kept
         self.assertGreaterEqual(len(kept), Limits().history_keep)
-        self.assertLessEqual(len(render_situation(s)), 42_000 + 2_000)  # + the context section
+        self.assertLessEqual(len(render_situation(s)), 30_000 + 2_000)  # + the context section
 
     def test_partial_identity_record_does_not_stop_kairo(self):
         rt = self.runtime(cognition=Recorder())
@@ -519,7 +523,8 @@ class BoundsTest(SituationCase):
         rt.start()
         for i in range(8):
             run_action(rt, [sys.executable, "-c", f"print('{i}' * 5000)"])
-        limits = Limits(budget=8_000)  # the eight actions alone render to about 11,000
+        # Each action shown with 400 characters of output: the eight render to about 7,500.
+        limits = Limits(budget=4_000, actions_recent=8)
         s = build_situation(rt.context(), limits)
         self.assertGreater(s["context"]["trimmed_for_budget"], 0)
         self.assertLess(len(render_situation(s)), limits.budget + 2000)  # + the context section
