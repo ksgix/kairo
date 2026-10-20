@@ -234,7 +234,9 @@
     if (err) {
       pill.className = "pill bad";
       text.textContent = err.code === "unreachable" ? "Kairo unreachable" : `error: ${err.code || "unknown"}`;
-      notice.textContent = `${err.error || "Kairo could not be reached"}. Nothing shown is current until it answers again.`;
+      notice.textContent = `${err.error || "Kairo could not be reached"}. Nothing shown is current until it answers again.`
+        + ((S.dashboard || {}).can_start ? " Use Start Kairo to start it."
+           : " This dashboard cannot start it; start it on the server (systemctl start kairo).");
       notice.hidden = false;
     } else if (st) {
       pill.className = `pill ${st.state === "awake" ? "awake" : st.state === "sleeping" ? "sleeping" : "warn"}`;
@@ -248,6 +250,14 @@
     byId("rev").textContent = st && st.revision ? `release ${st.revision.slice(0, 7)}` : "";
     byId("updated").textContent = S.updated ? `updated ${clock(S.updated)} UTC` : "";
     byId("flash").textContent = S.notes.header || "";
+    // Wake and Stop speak to Kairo, so they are useless when it is not there;
+    // Start speaks to the service manager, so it is the only one that helps.
+    const down = Boolean(err && err.code === "unreachable");
+    const canStart = Boolean((S.dashboard || {}).can_start);
+    byId("wake").hidden = down;
+    byId("stop").hidden = down;
+    byId("start").hidden = !down || !canStart;
+    byId("start").disabled = S.starting === true;
   }
 
   // -- monitors: one tile per thing that can be wrong ------------------------------------
@@ -309,10 +319,13 @@
   function attentionMonitor(d) {
     if (!d.sit) return monitor("Needs you", "unknown", "Loading…");
     const t = d.threads || {};
+    // An action still running is not an unknown outcome: nobody can know it yet.
+    // Counting it here made every long command look like something to look at.
+    const unresolved = (t.actions_outcome_unknown || []).filter((a) => (a || {}).state !== "in_progress");
     const items = [
       [(t.unanswered_human_messages || []).length, "unanswered message"],
       [d.blocked, "blocked work item"],
-      [(t.actions_outcome_unknown || []).length, "action with unknown outcome"],
+      [unresolved.length, "action with unknown outcome"],
       [(t.work_wait_elapsed || []).length, "elapsed wait"],
     ].filter(([n]) => n).map(([n, word]) => plural(n, word));
     if (t.previous_cycle_failed) items.push(`last cycle failed (${t.previous_cycle_failed.failure})`);
@@ -417,6 +430,7 @@
     const m = S.metrics, sit = S.situation;
     const d = {days: m && m.days, complete: m && m.days_complete, context: m && m.last_context, work: m && m.work,
                trimmed: ((sit || {}).context || {}).trimmed_for_budget, shortened: ((sit || {}).context || {}).long_texts_shortened_for_budget,
+               budget: ((sit || {}).now || {}).provider_call_budget || null,
                err: S.err.metrics, ok: supports("metrics")};
     paint("figures", d, () => {
       if (!d.days) return el("div", {class: "figure"}, el("div", {class: "figure-name"}, "Key figures"), unavailable("metrics", d.err));
@@ -430,14 +444,21 @@
           el("div", null, el("div", {class: "big"}, num(today.calls)), el("div", {class: "unit"}, "today so far (UTC)")),
           bars(days, [["decided", ""], ["failed", "failed"]], (x) => `${label(x)}: ${plural(x.calls, "call")}${x.failed ? `, ${x.failed} failed (${Object.entries(x.failures).map(([k, n]) => `${n} ${k}`).join(", ")})` : ""}`)),
         [el("span", null, peak && peak.calls ? `Peak ${num(peak.calls)} on ${label(peak)}` : "No calls recorded"),
+         // The operator's cap, when there is one: what actually stops Kairo working.
+         d.budget ? el("span", null, `Budget ${num(d.budget.used_today)} of ${num(d.budget.calls_per_day)} used today`
+                       + (typeof d.budget.renews_in_seconds === "number" ? ` · renews in ${span(d.budget.renews_in_seconds)}` : "")) : null,
          anyFailed ? el("span", {class: "legend"}, el("span", null, el("i", {class: "swatch", "aria-hidden": true}), "decided"),
                         el("span", null, el("i", {class: "swatch failed", "aria-hidden": true}), "failed")) : null]);
-      const cost = figure("Model cost per day, as the provider reports it",
+      // The provider reports what these calls would cost at API list prices. On a
+      // subscription that is not a bill; it is the only size the provider gives,
+      // and the plan's own limits are counted in calls, not dollars.
+      const cost = figure("Model use per day, priced as the provider reports it",
         el("div", {class: "figure-body"},
           el("div", null, el("div", {class: "big"}, money(today.cost_usd)), el("div", {class: "unit"}, "today so far (UTC)")),
           bars(costly.length ? days : [], [["cost_usd", ""]], (x) => `${label(x)}: ${typeof x.cost_usd === "number" ? money(x.cost_usd) + ` over ${plural(x.costed, "call")}` : "no cost reported"}`)),
         [el("span", null, dearest ? `Peak ${money(dearest.cost_usd)} on ${label(dearest)}` : "No cost reported yet"),
-         today.costed ? el("span", null, `${money(today.cost_usd / today.costed)} per call today`) : null]);
+         today.costed ? el("span", null, `${money(today.cost_usd / today.costed)} per call today`) : null,
+         el("span", {class: "muted"}, "API list prices. On a subscription nothing is billed by the dollar; usage counts against the plan's limits.")]);
       const c = d.context;
       const share = c ? c.chars / c.budget : 0;
       const context = figure("Context sent to the model, last call",
@@ -991,6 +1012,19 @@
     if (!confirm("Stop Kairo? It will not run again until the operator starts it.")) return;
     const r = await api("/api/stop", {});
     S.notes.header = r.ok ? "Stop requested." : `Refused: ${r.error} (${r.code})`;
+    await tick(true);
+    render();
+  });
+  // Start is the one control that does not go to Kairo: a stopped Kairo has no
+  // socket, so the dashboard asks the service manager instead (and may only do
+  // so when the operator configured it).
+  byId("start").addEventListener("click", async () => {
+    S.starting = true;
+    S.notes.header = "Starting Kairo…";
+    render();
+    const r = await api("/api/start", {});
+    S.notes.header = r.ok ? "Start requested; waiting for Kairo to answer." : `Could not start: ${r.error} (${r.code})`;
+    S.starting = false;
     await tick(true);
     render();
   });

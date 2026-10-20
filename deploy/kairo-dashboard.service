@@ -5,8 +5,14 @@
 # Kairo's socket is that account's only (mode 0600), and the socket is the
 # dashboard's only way to Kairo.
 #
-# It is independent of kairo.service on purpose: it does not start, stop or
-# restart Kairo, and Kairo does not depend on it. While Kairo is stopped or
+# It is independent of kairo.service on purpose: Kairo does not depend on it,
+# and it may do exactly one thing to the service -- start it, and only if the
+# operator installs deploy/kairo-dashboard-start.sudoers and adds
+# --start-unit kairo.service to ExecStart below. Without that it can never start
+# Kairo, and a stop from the browser can only be undone on the server. It can
+# never stop or restart the service; stopping Kairo is a request to Kairo
+# itself, which the runtime obeys gracefully.
+# While Kairo is stopped or
 # restarting, the dashboard reports it as unreachable. It runs the release that
 # was current when it started; after a deployment, restart it to serve the new
 # release's dashboard (it holds no state other than login sessions).
@@ -27,10 +33,17 @@ Group=@KAIRO_USER@
 WorkingDirectory=/var/lib/kairo
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
+# Add --start-unit kairo.service to allow the Start Kairo button (needs the
+# sudo rule in deploy/kairo-dashboard-start.sudoers; without it, starting fails).
 ExecStart=/bin/sh -c 'release=$$(readlink -f /var/lib/kairo/deploy/current) && exec env PYTHONPATH="$$release/src" /usr/bin/python3 -m kairo.dashboard --socket /var/lib/kairo/kairo.sock --host 127.0.0.1 --port 8765 --token-file /var/lib/kairo/dashboard.token'
 Restart=on-failure
 RestartSec=5
 # The dashboard needs nothing but its socket, its token file and a loopback port.
+# NoNewPrivileges=yes also blocks sudo (it is setuid), so with it the Start Kairo
+# button cannot work whatever the sudo rule says: the attempt fails and the page
+# reports it. To allow the button, set this to no and install the sudo rule. That
+# is a real loosening of this unit: weigh it against having to reach the server
+# to undo a stop. Everything else the dashboard does works either way.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/kairo

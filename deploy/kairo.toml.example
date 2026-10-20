@@ -1,0 +1,45 @@
+# Kairo's configuration file: the settings an operator changes, in one place.
+#
+# Copy to /var/lib/kairo/kairo.toml (beside the database), where Kairo reads it
+# at every start. Changing it takes effect at the next start:
+#   systemctl restart kairo
+#
+# Everything here has a command-line equivalent, and a flag given on the command
+# line wins. A setting left out keeps Kairo's default; a setting misspelled is an
+# error that stops Kairo rather than quietly leaving a default in place.
+#
+# Credentials never belong here. The Claude CLI authenticates itself.
+
+[cognition]
+# Which providers are asked, in order (--cognition). Later ones are asked only
+# when an earlier one fails technically, never to get a different answer.
+providers = "claude"
+
+# Which model (--model). Left out, the Claude CLI's own default is used.
+# A model's name is the CLI's, e.g. "opus", "sonnet", "haiku".
+# model = "opus"
+
+# Seconds one decision may take before it is given up on (--cognition-timeout).
+timeout = 300
+
+# At most this many cycles per UTC day may ask a provider (--calls-per-day).
+# 0 is no budget, and is the default.
+#
+# Each cycle that asks costs one call, whatever it then does; an action's own
+# running time costs nothing. A budget is therefore a cap on how often Kairo
+# stops to think, not on how much work it does: with few calls left it is told
+# so, and should do whole pieces of work in one action rather than many small
+# steps. When the budget is spent the runtime sleeps until the day turns,
+# without asking. Work in progress is unaffected.
+#
+# On a subscription, this is the setting that keeps Kairo inside the plan.
+calls_per_day = 0
+
+# Options for one provider instance (--provider-opt claude.KEY=VALUE).
+# [cognition.options.claude]
+# executable = "/home/kairo/.local/bin/claude"
+
+[runtime]
+# Seconds a sleeping Kairo waits before waking itself to reassess (--reassess).
+# 0 means sleep until something wakes it.
+reassess = 300

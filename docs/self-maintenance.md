@@ -94,6 +94,8 @@ sudo install -m 0755 deploy/kairo-fallback /usr/local/libexec/kairo-fallback
 sudo systemctl daemon-reload && sudo systemctl enable --now kairo.service
 ```
 
+- **Settings:** copy `deploy/kairo.toml.example` to `/var/lib/kairo/kairo.toml` and edit it there. It holds the model, the per-decision timeout, the reassessment interval and the daily call budget, so changing them is an edit and a `systemctl restart kairo`, not an edit of the unit. A flag in the unit's `ExecStart` wins over the file; the unit keeps only the two that must work with no file at all (which providers, and where the Claude CLI is). A misspelled setting stops Kairo rather than leaving a default silently in place.
+- **The daily call budget** (`calls_per_day`, 0 by default) is how a subscription is kept to. Each cycle that consults cognition spends one call, whatever it then does; an action's own running time costs nothing. So it caps how often Kairo stops to think, not how much work it does: Kairo is shown what is left and should then do whole pieces of work in one action rather than many small steps. Spent, the runtime sleeps until the UTC day turns without asking; a message or a wake then still leaves Kairo asleep, and the activity log says why, so set the budget to a number you are content to wait out. A deployment's dry cycle is not affected: it calls no provider, so a spent budget never stops a release being checked. The count comes from the cycle records, so restarting does not renew it.
 - **Requirements:** systemd 254 or later (`RestartMode=direct`).
 - **What it installs:** `/etc/systemd/system/kairo.service`, `/etc/systemd/system/kairo-fallback.service` and `/usr/local/libexec/kairo-fallback`.
 - **The unit template:**

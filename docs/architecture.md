@@ -48,6 +48,8 @@ implementations and the situation model. Back to the [README](../README.md); see
 The runtime keeps a failing or spinning cognition from running hot. Both rules are facts about cycles; neither judges a decision.
 
 - **Failure backoff:** a cycle in which cognition failed is retried after a delay that doubles per consecutive failure (60 seconds up to 1 hour), whatever the default reassessment is. It is never retried at once, and never "sleep until woken". A usable decision resets it; any wake interrupts it.
+- **Waiting for a usage limit:** when the provider's own message names when its limit resets, the runtime waits until then (plus a margin) instead of through that backoff: retrying earlier is known to fail, and retrying long after wastes the time it was available again. A reset time that is absent, already past or implausibly far off is not believed, and the ordinary backoff applies.
+- **Daily call budget:** optional (`calls_per_day`, 0 by default). Each cycle that consults cognition spends one call; actions cost nothing to run. Beyond the budget the runtime sleeps until the UTC day turns without asking, and what is left is a fact in the situation (`now.provider_call_budget`) so cognition can spend the rest on larger steps. Counted from the cycle records, not from a counter a restart would clear.
 - **Stalled cycles:** a decided cycle that ran no action, applied no work request, posted no reply, and did not rest (it stayed awake, or asked to be woken in under 30 seconds) changes nothing. After 5 in a row the runtime rests by itself for 5 minutes (or the default reassessment, if longer). Cognition sees both in the cycle log (`retry_after_seconds`, `rested_by_runtime`).
 
 ### Probes and quiet wakes

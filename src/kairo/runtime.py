@@ -74,6 +74,7 @@ DIRECTIVE_PAGE = 200   # directives in one read
 # Both are runtime facts about cycles; neither judges what cognition decided.
 FAILURE_BACKOFF = 60.0        # seconds before retrying after one failed cognition cycle
 FAILURE_BACKOFF_MAX = 3600.0  # the retry delay doubles per consecutive failure up to this
+LIMIT_MARGIN = 30.0           # added to a provider's own reset time before asking again
 STALL_LIMIT = 5               # consecutive cycles that change nothing and do not rest
 STALL_WAKE = 30.0             # a sleep shorter than this, after changing nothing, is not rest
 STALL_REST = 300.0            # seconds the runtime then rests (or reassess_after, if longer)
@@ -109,14 +110,21 @@ class Runtime:
         cognition: Cognition | CognitionProvider | None = None,
         verifiers: dict[str, Verifier] | None = None,
         reassess_after: float | None = None,
+        calls_per_day: int | None = None,
     ) -> None:
         """``reassess_after``: default seconds a sleeping runtime waits before
-        waking itself to reassess. None means sleep until explicitly woken."""
+        waking itself to reassess. None means sleep until explicitly woken.
+
+        ``calls_per_day``: at most this many cycles per UTC day may ask a
+        provider; beyond it the runtime sleeps instead of asking. None or 0 is
+        no budget, which is the default."""
         self.memory = memory
         self.environment = environment or Environment()
         self.cognition = cognition
         self.verifiers = verifiers or {}
         self.reassess_after = reassess_after
+        self.calls_per_day = calls_per_day or None
+        self._calls: tuple[int, int] | None = None  # (UTC day index, calls that day)
         self.directives = Directives(memory)
         self.chat = Chat(memory)
         self.work = WorkLedger(memory)
@@ -600,6 +608,8 @@ class Runtime:
                 "cycles_this_process": self._cycles,
                 "previous_process": self.previous,
                 "default_reassess_after": self.reassess_after,
+                # None unless the operator set a budget; see Runtime.budget.
+                "budget": self.budget(),
                 "verifiers": sorted(set(self.verifiers) | self._environment_verified()),
                 "quiet": None if self._quiet is None else {
                     "since": self._quiet["since"], "skipped": self._quiet["skipped"]},
@@ -809,7 +819,10 @@ class Runtime:
 
         A failed cycle is retried after a delay that doubles per consecutive
         failure (FAILURE_BACKOFF up to FAILURE_BACKOFF_MAX), whatever the default
-        reassessment is: never at once, and never "sleep until woken".
+        reassessment is: never at once, and never "sleep until woken". When the
+        provider itself named when it is worth asking again (a usage limit's
+        reset), the wait is until then instead: retrying earlier is known to
+        fail, and retrying hours later would waste the time it was available.
 
         A decided cycle that changed nothing (no action ran, no work request was
         applied, no reply was posted) and did not rest (stayed awake, or asked to
@@ -820,6 +833,14 @@ class Runtime:
             self._failures += 1
             self._stalled = 0
             delay = min(FAILURE_BACKOFF * 2 ** (self._failures - 1), FAILURE_BACKOFF_MAX)
+            until = cognition.get("retry_at")
+            if isinstance(until, (int, float)) and not isinstance(until, bool):
+                # The provider's own reset time wins over the blind backoff.
+                delay = max(until - time.time() + LIMIT_MARGIN, FAILURE_BACKOFF)
+                cognition["consecutive_failures"] = self._failures
+                cognition["retry_after"] = delay
+                return (f"{sleep_reason}; waiting until the provider says it resets "
+                        f"({_utc(until)}, in {round(delay)}s)"), delay
             cognition["consecutive_failures"] = self._failures
             cognition["retry_after"] = delay
             return (f"{sleep_reason}; retry in {round(delay)}s "
@@ -844,6 +865,30 @@ class Runtime:
         return (f"rested by the runtime: {STALL_LIMIT} cycles in a row changed nothing and "
                 "did not rest"), delay
 
+    def budget(self, now: float | None = None) -> dict[str, Any] | None:
+        """The day's provider-call budget: how many calls it allows, how many
+        this UTC day has used, and when it renews. None when unbudgeted.
+
+        Calls are counted from the runtime's own cycle records, so a restart
+        does not hand Kairo a fresh allowance."""
+        if self.calls_per_day is None:
+            return None
+        now = time.time() if now is None else now
+        day = int(now // history.DAY)
+        if self._calls is None or self._calls[0] != day:
+            self._calls = (day, history.calls_on_day(self.memory, now))
+        used = self._calls[1]
+        return {"calls_per_day": self.calls_per_day, "calls_today": used,
+                "remaining": max(self.calls_per_day - used, 0),
+                "renews_at": (day + 1) * history.DAY}
+
+    def _count_call(self, now: float | None = None) -> None:
+        """One more cycle in which a provider was asked, today."""
+        if self.calls_per_day is None:
+            return
+        day = int((time.time() if now is None else now) // history.DAY)
+        self._calls = (day, (self._calls[1] + 1 if self._calls and self._calls[0] == day else 1))
+
     def _decide_and_act(
         self, context: Context,
     ) -> tuple[list[Step], str, dict[str, Any], str | None, float | None]:
@@ -851,10 +896,20 @@ class Runtime:
         if self.cognition is None:
             reason = "no cognition provider configured"
             return [], reason, {"result": "none"}, reason, None
+        budget = self.budget()
+        if budget is not None and budget["remaining"] <= 0:
+            # Spent for today. Not a failure and not Kairo's decision: a limit
+            # the operator set, which renews at the next UTC day.
+            wake_after = max(budget["renews_at"] - time.time(), 1.0)
+            reason = (f"the day's provider-call budget is spent "
+                      f"({budget['calls_today']}/{budget['calls_per_day']}); "
+                      f"it renews at {_utc(budget['renews_at'])}")
+            return [], reason, {"result": "over_budget", "budget": budget}, reason, wake_after
 
         # Which provider is asked, and fallback, belong to the cognition layer;
         # the runtime only receives at most one validated Decision.
         started = time.monotonic()
+        self._count_call()  # asked, whatever comes back: the budget counts attempts
         try:
             result = as_cognition(self.cognition).decide(context)
         except Exception as exc:  # the cognition layer itself failed: still not fatal
@@ -867,9 +922,11 @@ class Runtime:
         if decision is None:  # every provider asked failed: a cycle-level cognition failure
             reason = redact(f"cognition error ({result.failure}): {result.attempts[-1].detail}",
                             limit=500)
-            return [], reason, {"result": "failed", "failure": result.failure,
-                                "seconds": round(time.monotonic() - started, 3),
-                                **provenance}, reason, None
+            summary = {"result": "failed", "failure": result.failure,
+                       "seconds": round(time.monotonic() - started, 3), **provenance}
+            if result.retry_at is not None:  # the provider named when to ask again
+                summary["retry_at"] = result.retry_at
+            return [], reason, summary, reason, None
 
         summary = {
             "result": "decided",

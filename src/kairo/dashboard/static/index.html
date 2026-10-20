@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="kairo-csrf" content="{{CSRF}}">
 <title>Kairo</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -16,6 +17,7 @@
   <span id="flash" class="muted small" role="status"></span>
   <span id="updated" class="muted small"></span>
   <button id="customize" type="button" aria-pressed="false">Customize</button>
+  <button id="start" type="button" class="go" hidden>Start Kairo</button>
   <button id="wake" type="button">Wake now</button>
   <button id="stop" type="button" class="danger">Stop Kairo</button>
   <form method="post" action="/logout"><button type="submit">Log out</button></form>

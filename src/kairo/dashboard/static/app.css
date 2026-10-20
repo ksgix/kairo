@@ -17,6 +17,7 @@
   --orange: #d95926;      /* failed model calls: the second data colour */
   --idle: #4a4a46;        /* stopped */
   --ok: #0ca30c;
+  --ok-ink: #8fd99a;   /* readable green on the dark surface (11:1) */
   --warn: #fab219;
   --serious: #ec835a;
   --serious-ink: #f3b49b;
@@ -112,6 +113,9 @@ button:disabled { opacity: .5; cursor: default; }
 button.primary { background: var(--text); border-color: var(--text); color: var(--bg); }
 button.primary:hover { background: #ffffff; }
 button.danger { border-color: var(--serious); color: var(--serious-ink); }
+/* Start: the only control that helps while Kairo is down, so it leads. */
+button.go { border-color: var(--ok); color: var(--ok-ink); }
+button[hidden] { display: none; }
 button.link {
   min-height: 0;
   padding: 0;

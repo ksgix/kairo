@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Kairo">
+  <title>Kairo</title>
+  <!-- The dashboard's own surface, so the mark reads the same on a light or a
+       dark tab bar instead of relying on the browser's background. -->
+  <rect width="32" height="32" rx="7" fill="#141413"/>
+  <!-- The cycle: observe, decide, act, sleep. Open, because it is not a closed
+       loop; the gap is where a wake comes in. Blue is the dashboard's one data
+       colour (#3987e5), used here for the running runtime. -->
+  <circle cx="16" cy="16" r="9" fill="none" stroke="#3987e5" stroke-width="3"
+          stroke-linecap="round" stroke-dasharray="46.81 9.74"
+          transform="rotate(-27 16 16)"/>
+  <!-- The moment itself, at the opening: kairos, the opportune moment. -->
+  <circle cx="22.02" cy="9.31" r="3.1" fill="#cde2fb"/>
+</svg>

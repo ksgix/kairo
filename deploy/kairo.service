@@ -10,8 +10,16 @@
 #
 # Layout (see docs/self-maintenance.md):
 #   /var/lib/kairo/kairo.db        the one authoritative database (locked by the runtime)
+#   /var/lib/kairo/kairo.toml      optional configuration (deploy/kairo.toml.example)
 #   /var/lib/kairo/dev             development worktree Kairo edits and commits in
 #   /var/lib/kairo/deploy          releases/<sha>, current, previous, snapshots/
+#
+# Settings: the model, the per-decision timeout, the daily call budget and the
+# reassessment interval are read from kairo.toml beside the database, so they can
+# be changed without editing this unit (then: systemctl restart kairo). The flags
+# in ExecStart below win over that file, so the two flags that must work even
+# with no file -- which providers, and where the Claude CLI is -- stay here. Move
+# them into the file only if you also remove them from ExecStart.
 #
 # Exit status 75: a deployment selected a new release -> restart now (not a failure).
 # Exit status 0:  a stop (systemctl stop, IPC stop, SIGTERM) -> stay stopped.

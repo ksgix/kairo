@@ -54,6 +54,22 @@ def metrics(memory: Memory, now: float, budget: int) -> dict[str, Any]:
     })
 
 
+def calls_on_day(memory: Memory, now: float) -> int:
+    """How many cycles of this UTC day asked a provider (decided or failed).
+
+    Read from the records, not from a counter in memory, so the figure survives
+    a restart: a budget a restart resets is no budget at all. Cycles are scanned
+    newest first and stop at the day boundary."""
+    start = (now // DAY) * DAY
+    calls = 0
+    for at, result in memory.fields("cycle", ("at", "cognition.result"), METRIC_CYCLES):
+        if not _is_number(at) or at < start:
+            break  # newest first: the rest are older still
+        if result in ("decided", "failed"):
+            calls += 1
+    return calls
+
+
 def activity(memory: Memory, limit: int, before: int | None = None) -> dict[str, Any]:
     rows, more = memory.stream(ACTIVITY_KINDS, min(limit, ACTIVITY_PAGE), before)
     items = []

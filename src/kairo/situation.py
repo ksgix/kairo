@@ -200,12 +200,28 @@ def _now(ctx: Context, now: float) -> dict[str, Any]:
             "ended_in_state": last.get("state"),
         },
         "default_reassess_after_seconds": r.get("default_reassess_after"),
+        # The operator's cap on provider calls per UTC day, if any. Absent means
+        # uncapped. Each cycle that asks a provider spends one, so fewer, larger
+        # steps buy more work per day than many small ones.
+        **({"provider_call_budget": _budget(r.get("budget"), now)}
+           if isinstance(r.get("budget"), dict) else {}),
         # Timer wakes at which nothing observable had changed, so cognition was not asked.
         **({"timer_wakes_without_cognition": {
             "count": r["quiet"].get("skipped"), "since": _when(r["quiet"].get("since"), now)}}
            if isinstance(r.get("quiet"), dict) and r["quiet"].get("skipped") else {}),
         # Which cognition provider is being asked now, and why (runtime facts).
         "cognition": _asked(r.get("cognition")),
+    }
+
+
+def _budget(budget: dict[str, Any], now: float) -> dict[str, Any]:
+    return {
+        "calls_per_day": budget.get("calls_per_day"),
+        "used_today": budget.get("calls_today"),
+        "remaining_today": budget.get("remaining"),
+        # A time ahead, not behind: given plainly rather than as an age.
+        **({"renews_at": _iso(renews), "renews_in_seconds": max(round(renews - now), 0)}
+           if (renews := _number(budget.get("renews_at"))) is not None else {}),
     }
 
 

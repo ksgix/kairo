@@ -59,16 +59,16 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kairo-dashboard
 
 **The page.** There is one page, laid out like a monitoring console, and everything on it comes from these reads. From top to bottom:
 
-- Top bar: state and next wake, the running release, Customize, Wake now, Stop Kairo and Log out.
+- Top bar: state and next wake, the running release, Customize, Wake now, Stop Kairo and Log out. While Kairo is unreachable, Wake and Stop give way to **Start Kairo** (below): both of them are requests to Kairo, and there is nothing there to receive them.
 - Monitors: one tile per thing that can be wrong, each with a glyph, a word (OK, Check, Problem, Unknown) and a line of facts.
   - Runtime: reachable, and since when this process runs.
   - Model: the last call's result, and failed calls today.
   - Release: the running release and its status, the previous release, and whether the development repository is ahead of it.
   - Dashboard: whether the dashboard serves the release Kairo runs. After a deployment it does not until it is restarted, and this tile says so.
   - Purpose: active directives. None is a Check: Kairo then acts only on messages.
-  - Needs you: unanswered messages, blocked work, actions with unknown outcome, elapsed waits, a failed last cycle.
+  - Needs you: unanswered messages, blocked work, actions whose outcome nobody can establish any more, elapsed waits, a failed last cycle. An action still running is not one of these: nobody can know its outcome yet.
 - Runtime timeline: when Kairo was running, stopped, or not recorded (a process that ended without recording a stop), with a mark at each deployment. It covers at most the last 14 days and starts at the first recorded start: releases before this view recorded no starts or stops.
-- Key figures: model calls per day (failed ones stacked), the cost per day as the provider reports it, the size of the last context sent against the situation budget, and work by state.
+- Key figures: model calls per day (failed ones stacked, with the day's call budget when one is set), what those calls would cost per day at the provider's list prices, the size of the last context sent against the situation budget, and work by state. The cost is not a bill: on a subscription nothing is charged by the dollar, and it is the only size the provider reports. What limits Kairo there is the plan's own allowance, counted in calls.
 - Directives: each with statement, description, state, origin, linked open work and history; add with a statement and a description; deactivate, activate.
 - Work: open items with next step, facts, Kairo's account, attempts and recovery; recently closed items with their completion basis and evidence.
 - Activity: the record as a log, newest first, with filters (decisions, actions, deployments, failures) and Load earlier, which pages back through the whole record. A deployment shows each stage: build, the candidate's tests (gate), the old tests (evidence), the dry cycle (gate), snapshot, switch.
@@ -111,5 +111,13 @@ Polling reads only (status and chat every 5 s, activity every 15 s, the situatio
 - Secrets are redacted by Kairo before anything leaves the socket. The token is never served or logged, and request logs carry only the method and path.
 - Requests are bounded: 16 at once. Kairo still answers them one at a time.
 
-**Not available, by design:** no shell, process or action execution; no implementation calls; no SQL or database access; no file access; no Work editing; no deployment or configuration; no arbitrary HTTP or debug endpoints. Anything else is asked of Kairo in a message, and Kairo does it as an ordinary, recorded and verified action, or not at all.
+**Starting Kairo.** Every other control is a request to Kairo over its socket. A stopped Kairo has no socket, so the dashboard would be able to stop Kairo but never to start it again, and an operator who stopped it from the browser would have to reach the server to undo that. `POST /api/start` is the one exception: it asks the service manager instead, by running exactly `sudo -n systemctl start <unit>`.
+
+- It is off unless the operator turns it on. Without `--start-unit`, `/api/start` is refused and the button never appears; the page then says to start Kairo on the server.
+- The command is fixed in code. The unit comes from `--start-unit`, is validated once at startup (a plain unit name, never beginning with `-`), and nothing a request carries reaches the command. There is no shell.
+- It needs `deploy/kairo-dashboard-start.sudoers`, which allows that one command and nothing else, and `NoNewPrivileges=no` in the dashboard's unit, because `sudo` is setuid. Both are real loosenings; weigh them against having to reach the server to undo a stop.
+- It needs the session and the CSRF token like any other state change. Starting a unit that is already running does nothing, so a double click cannot disturb a working Kairo.
+- Stopping stays a request to Kairo, which ends gracefully. The dashboard can never stop or restart the service.
+
+**Not available, by design:** no shell, process or action execution; no implementation calls; no SQL or database access; no file access; no Work editing; no deployment or configuration; no arbitrary HTTP or debug endpoints, and no command but the one fixed service start above. Anything else is asked of Kairo in a message, and Kairo does it as an ordinary, recorded and verified action, or not at all.
 

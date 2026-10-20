@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -31,6 +32,16 @@ DEFAULT_TIMEOUT = 300.0
 SECRET_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 SECRET_FILES = ("~/.claude/.credentials.json",)
 OPTIONS = {"model", "timeout", "executable"}
+
+# Reading when a usage limit resets out of the CLI's own message. Both shapes
+# are the CLI's wording, which can change; when neither matches, the runtime
+# falls back to its ordinary retry backoff, so a miss costs nothing but time.
+LIMIT_EPOCH = re.compile(r"(?:reached|resets?(?:\s+at)?|until|limit)\s*[|:]?\s*"
+                         r"(\d{10}(?:\d{3})?)\b", re.IGNORECASE)
+LIMIT_DELAY = re.compile(r"(?:retry|try\s+again|wait)[^.\n]{0,24}?\b(\d{1,7})\s*seconds?\b",
+                         re.IGNORECASE)
+LIMIT_WAIT_MAX = 7 * 24 * 3600.0  # a reported reset further off than this is not believed
+REPORTED_DETAIL = 200             # characters of the provider's own error text kept
 
 
 class ClaudeCognition:
@@ -155,14 +166,52 @@ def _reported_error(envelope: dict[str, Any]) -> CognitionError:
     status = envelope.get("api_error_status")
     status = status if isinstance(status, int) and not isinstance(status, bool) else None
     text = str(envelope.get("result") or "")
-    detail = f"claude reported an error: {_tail(str(status or envelope.get('subtype') or 'unknown error'))}"
+    # What the CLI said, not only the status it said it with: a bare "429" cannot
+    # be told apart from a plan's usage limit, and the difference decides whether
+    # to retry in a minute or wait for a reset. The text is the provider's, so it
+    # is untrusted content: bounded here, redacted before it is recorded.
+    named = str(status or envelope.get("subtype") or "unknown error")
+    said = _tail(text, REPORTED_DETAIL)
+    detail = f"claude reported an error: {named}" + (f": {said}" if said else "")
     if status in (401, 403) or "/login" in text or "invalid api key" in text.lower():
         return CognitionError("auth_failed", detail)
+    if _is_usage_limit(text):
+        # A plan's usage limit, not momentary throttling: the CLI usually names
+        # when it resets, and waiting for that beats retrying blind.
+        return CognitionError("rate_limited", f"{detail} (usage limit)",
+                              retry_at=_resets_at(text))
     if status in (429, 529):
-        return CognitionError("rate_limited", detail)
+        return CognitionError("rate_limited", detail, retry_at=_resets_at(text))
     if status is not None and 500 <= status < 600:
         return CognitionError("unavailable", detail)
     return CognitionError("model_error", detail)
+
+
+def _is_usage_limit(text: str) -> bool:
+    lowered = text.lower()
+    return "usage limit" in lowered or "limit reached" in lowered
+
+
+def _resets_at(text: str, now: float | None = None) -> float | None:
+    """When the CLI says the limit resets, as epoch seconds, or None.
+
+    Two shapes are read, and nothing is inferred from anything else: the CLI's
+    ``...limit reached|<epoch>`` suffix, and a ``retry after N seconds`` style
+    delay. A time already past, or absurdly far ahead, is treated as unknown:
+    a wrong wait is worse than the ordinary retry backoff.
+    """
+    now = time.time() if now is None else now
+    for match in LIMIT_EPOCH.finditer(text):
+        stamp = float(match.group(1))
+        if stamp > 1e11:  # milliseconds
+            stamp /= 1000.0
+        if now < stamp <= now + LIMIT_WAIT_MAX:
+            return stamp
+    for match in LIMIT_DELAY.finditer(text):
+        delay = float(match.group(1))
+        if 0 < delay <= LIMIT_WAIT_MAX:
+            return now + delay
+    return None
 
 
 def _answer(envelope: dict[str, Any]) -> Any:

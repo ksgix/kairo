@@ -1,0 +1,38 @@
+# Let the dashboard start Kairo, and nothing else.
+#
+# Everything else the dashboard offers is a request to Kairo over its socket.
+# Starting is the one thing a stopped Kairo cannot be asked to do, so without
+# this rule a stop from the browser can only be undone on the server. With it,
+# the dashboard's Start Kairo button works.
+#
+# This is a privilege grant: read it before installing it. What it allows is one
+# command, with no arguments the browser can influence — the dashboard's argv is
+# fixed in code (kairo.dashboard.Dashboard.start_kairo) and the unit name comes
+# from its own --start-unit flag, validated at startup. It cannot stop, restart,
+# disable or edit anything, and it cannot start any other unit. Starting a unit
+# that is already running does nothing.
+#
+# It is still a real grant: anyone who can reach the dashboard and log in can
+# start Kairo. The dashboard listens on 127.0.0.1 only and needs its login
+# token, so that means someone with an account on this host and the token.
+# If you would rather not grant it, leave this file out and --start-unit unset:
+# the button never appears, and the page says to start Kairo on the server.
+#
+# Install (as root), replacing KAIRO_USER with the account Kairo runs as:
+#
+#   sed 's/@KAIRO_USER@/KAIRO_USER/' kairo-dashboard-start.sudoers \
+#     > /etc/sudoers.d/kairo-dashboard-start
+#   chmod 0440 /etc/sudoers.d/kairo-dashboard-start
+#   visudo -cf /etc/sudoers.d/kairo-dashboard-start     # must say "parsed OK"
+#
+# Then, in deploy/kairo-dashboard.service (and the installed unit):
+#   - add --start-unit kairo.service to ExecStart;
+#   - set NoNewPrivileges=no. sudo is setuid, so NoNewPrivileges=yes blocks it
+#     whatever this file says, and the button would always fail.
+# Then: systemctl daemon-reload && systemctl restart kairo-dashboard
+#
+# To check it without the browser, as the Kairo account:
+#   sudo -n systemctl start kairo.service   # should succeed and print nothing
+#   sudo -n systemctl stop kairo.service    # should be refused
+
+@KAIRO_USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl start kairo.service

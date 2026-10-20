@@ -13,6 +13,36 @@ names the commit that introduced it.
 
 ### Added
 
+- A configuration file (`kairo.config`, `deploy/kairo.toml.example`): the model, the
+  per-decision timeout, the provider order and options, the reassessment interval and
+  the daily call budget in one TOML file beside the database, instead of flags spread
+  through the service unit. A flag given on the command line still wins, so the file is
+  never a second source of truth; an unknown setting or a wrong type stops Kairo rather
+  than leaving a default silently in place. Read with `--config PATH`, or from
+  `kairo.toml` beside `--db`.
+- A daily budget of provider calls (`cognition.calls_per_day`, `--calls-per-day`; 0, no
+  budget, by default). Each cycle that consults cognition spends one call whatever it
+  then does, while an action's own running time costs nothing, so the budget caps how
+  often Kairo stops to think, not how much work it does. What is left is shown to Kairo
+  in its situation (`now.provider_call_budget`) and on the dashboard, so it can do
+  whole pieces of work in one action instead of many small steps; spent, the runtime
+  sleeps until the UTC day turns without asking. Counted from the cycle records, so a
+  restart is not a way round it.
+- Waiting for a usage limit to reset instead of retrying blind: when the provider's own
+  message names when the limit resets, that is read (`CognitionError.retry_at`) and the
+  runtime waits until then rather than through the doubling backoff. A time already
+  past, absent or implausible keeps the ordinary backoff, so nothing is guessed.
+- A tab icon for the dashboard (`static/favicon.svg`): the runtime's cycle drawn open,
+  with the moment at the gap, on the dashboard's own dark surface so it reads the same
+  on a light or a dark tab bar. Served from the dashboard's own origin like every other
+  asset, which is all its content policy allows, and present on the login page too.
+- A **Start Kairo** button on the dashboard, shown only when Kairo is unreachable, and
+  only when the operator allowed it with `--start-unit` and the sudo rule in
+  `deploy/kairo-dashboard-start.sudoers`. Everything else the dashboard offers is a
+  request to Kairo over its socket; starting is the one thing a stopped Kairo cannot be
+  asked to do, so the adapter asks the service manager instead, on an argv fixed in
+  code that no request can shape. Without it, a stop from the browser could only be
+  undone on the server.
 - Operator views of history (`kairo.history`): the `metrics` operation (per UTC day the
   cycles, model calls, failures by kind and reported cost; the last context size; work
   by state; when the runtime was running; the latest deployments) and the `activity`
@@ -126,6 +156,20 @@ names the commit that introduced it.
 
 ### Fixed
 
+- The dashboard no longer counts an action that is still running as "an action with
+  unknown outcome" needing the operator, which made every long command look like
+  something to look at. Only an action whose outcome nobody can establish any more
+  counts; an action in progress is simply in progress.
+- The dashboard's cost figure said "Model cost per day", which on a subscription reads
+  as a bill. It is what the provider says the calls would cost at API list prices,
+  which is the only size it reports; the figure now says so, and the calls figure shows
+  the day's budget, which is what actually stops Kairo working.
+- Wake and Stop are hidden while Kairo is unreachable instead of staying clickable and
+  failing: both are requests to Kairo, and there is nothing there to receive them.
+- A provider error recorded only its status, so a plan's usage limit and ordinary
+  throttling both read as `claude reported an error: 429` and nothing said when a limit
+  resets could reach the log or Kairo. The provider's own message is now kept with it,
+  bounded to 200 characters and redacted like any other untrusted output.
 - Restart test redaction path fragility (`9eb0ca9`).
 - Dashboard browser `Origin` handling (`03e598d`).
 

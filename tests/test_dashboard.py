@@ -795,9 +795,12 @@ class ContentTest(DashboardCase):
 # -- 19-21: what the dashboard cannot do ------------------------------------------------
 
 
+# re: validating the one unit name. subprocess: starting that one service, which a
+# stopped Kairo cannot be asked to do over IPC. Both are held to their one use by
+# BoundaryTest.test_the_only_command_is_a_fixed_service_start.
 ALLOWED_IMPORTS = {"__future__", "argparse", "hmac", "ipaddress", "json", "logging", "os",
-                   "secrets", "socket", "sys", "threading", "time", "http", "http.server",
-                   "pathlib", "typing", "urllib.parse", "kairo.ipc"}
+                   "re", "secrets", "socket", "subprocess", "sys", "threading", "time",
+                   "http", "http.server", "pathlib", "typing", "urllib.parse", "kairo.ipc"}
 
 
 class BoundaryTest(DashboardCase):
@@ -827,11 +830,52 @@ class BoundaryTest(DashboardCase):
                 imported.add(node.module)
         self.assertLessEqual(imported, ALLOWED_IMPORTS, imported - ALLOWED_IMPORTS)
         source = Path(dashboard.__file__).read_text()
-        for name in ["sqlite3", "Memory", "Runtime", "subprocess", "os.system", "Popen",
+        for name in ["sqlite3", "Memory", "Runtime", "os.system", "Popen",
                      "exec(", "eval(", "kairo.db", "situation import", "deploy import"]:
             self.assertNotIn(name, source)
-        # Its only ways out: the IPC client, and the token file it writes.
+        # Its only ways out: the IPC client, the token file it writes, and the
+        # one fixed command of test_the_only_command_is_a_fixed_service_start.
         self.assertEqual(source.count("request(self.socket_path"), 1)
+
+    def test_the_only_command_is_a_fixed_service_start(self):
+        """The dashboard runs exactly one command, and the browser cannot shape
+        it. Starting Kairo is the one thing a stopped Kairo cannot be asked to
+        do over IPC, so the adapter asks the service manager instead — on a
+        fixed argv, with only the unit named at startup varying."""
+        tree = ast.parse(Path(dashboard.__file__).read_text())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                 and n.func.value.id == "subprocess"]
+        self.assertEqual([n.func.attr for n in calls], ["run"], "one subprocess call only")
+        [run] = calls
+        keywords = {k.arg: k.value for k in run.keywords}
+        self.assertNotIn("shell", keywords)  # never a shell
+        self.assertIsInstance(keywords["stdin"], ast.Attribute)  # no inherited stdin
+        # The argv is assigned literally, and the only part that is not a constant
+        # is the unit this dashboard was started with.
+        [argv] = [n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                  and any(getattr(t, "id", None) == "argv" for t in n.targets)]
+        self.assertIsInstance(argv, ast.List)
+        fixed = [e.value for e in argv.elts if isinstance(e, ast.Constant)]
+        self.assertEqual(fixed, ["sudo", "-n", "systemctl", "start"])
+        self.assertEqual(len(argv.elts), 5)
+        self.assertEqual(ast.unparse(argv.elts[4]), "self.start_unit")
+
+    def test_a_unit_name_is_checked_once_at_startup_not_per_request(self):
+        for bad in ["kairo.service; rm -rf /", "../../etc/kairo", "kairo && reboot",
+                    "$(id)", "unit name", "-x", "", "a" * 200]:
+            with self.assertRaises(ValueError, msg=bad):
+                dashboard._service_unit(bad)
+        self.assertEqual(dashboard._service_unit("kairo.service"), "kairo.service")
+        self.assertEqual(dashboard._service_unit("kairo"), "kairo")
+
+    def test_start_is_refused_unless_the_operator_configured_a_unit(self):
+        # The default: no unit, so the dashboard can never start anything.
+        self.ready()
+        self.stop_kairo()
+        self.assertIsNone(self.server.start_unit)
+        self.fails(self.post("/api/start", {}), 501, "not_configured")
+        self.assertFalse(self.get("/api/dashboard").json()["result"]["can_start"])
 
     def test_writes_happen_only_through_kairo(self):
         # With Kairo gone, nothing a browser sends can be stored anywhere.
@@ -870,7 +914,7 @@ class BoundaryTest(DashboardCase):
         posts = set(re.findall(r'api\("(/api/[a-z/]+)", ', js)) | \
             set(re.findall(r'api\(`(/api/[a-z/]+)\$', js))
         self.assertEqual(posts, {"/api/message", "/api/directives", "/api/directives/",
-                                 "/api/wake", "/api/stop"})
+                                 "/api/wake", "/api/stop", "/api/start"})
         # Polling runs only the loaders in LOADS, and every loader only reads.
         tick = js[js.index("async function tick"):js.index("// -- painting")]
         self.assertNotIn("api(", tick)
@@ -1290,7 +1334,7 @@ class InstallTest(unittest.TestCase):
         pyproject = (ROOT / "pyproject.toml").read_text()
         self.assertIn('"kairo.dashboard" = ["static/*"]', pyproject)
         self.assertEqual(sorted(p.name for p in STATIC.iterdir()),
-                         ["app.css", "app.js", "index.html", "login.html"])
+                         ["app.css", "app.js", "favicon.svg", "index.html", "login.html"])
 
     def test_main_writes_the_token_and_logs_only_where_it_is(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1305,6 +1349,93 @@ class InstallTest(unittest.TestCase):
         token = token_file.read_text().strip()
         self.assertNotIn(token, "\n".join(logs.output))
         self.assertIn(str(token_file), "\n".join(logs.output))
+
+
+class StartTest(DashboardCase):
+    """Starting Kairo from the browser. Everything else the dashboard offers is
+    a request to Kairo; this is a request to the host, because a stopped Kairo
+    has no socket to receive anything. It is the narrowest thing that works: one
+    fixed command, one unit named at startup, and no effect at all unless the
+    operator granted the sudo rule."""
+
+    def fake_sudo(self, exit_code=0, message=""):
+        """A sudo on PATH that records its arguments instead of running them,
+        so the test sees exactly what the dashboard would have run."""
+        log = self.dir / "sudo.log"
+        binaries = self.dir / "bin"
+        binaries.mkdir(exist_ok=True)
+        (binaries / "sudo").write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> {log}\n'
+            f'{f"echo {message!r} >&2" if message else ":"}\n'
+            f"exit {exit_code}\n")
+        (binaries / "sudo").chmod(0o755)
+        previous = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{binaries}:{previous}"
+        self.addCleanup(os.environ.__setitem__, "PATH", previous)
+        return log
+
+    def test_the_command_is_exactly_a_start_of_the_configured_unit(self):
+        log = self.fake_sudo()
+        self.ready()
+        self.stop_kairo()
+        self.serve(start_unit="kairo.service")
+        self.login()
+        self.assertEqual(self.ok("POST", "/api/start"), {"started": "kairo.service"})
+        self.assertEqual(log.read_text().strip(), "-n systemctl start kairo.service")
+
+    def test_nothing_the_browser_sends_changes_the_command(self):
+        log = self.fake_sudo()
+        self.ready()
+        self.stop_kairo()
+        self.serve(start_unit="kairo")
+        self.login()
+        for fields in [{"unit": "evil.service"}, {"argv": ["rm", "-rf", "/"]},
+                       {"op": "stop"}, {"start_unit": "other"}]:
+            self.post("/api/start", fields)
+        self.assertEqual(set(log.read_text().splitlines()), {"-n systemctl start kairo"})
+
+    def test_a_failed_start_is_reported_not_hidden(self):
+        self.fake_sudo(exit_code=1, message="sudo: a password is required")
+        self.ready()
+        self.stop_kairo()
+        self.serve(start_unit="kairo")
+        self.login()
+        error = self.fails(self.post("/api/start", {}), 502, "start_failed")
+        self.assertIn("password is required", error)
+
+    def test_starting_needs_a_session_and_the_csrf_token(self):
+        log = self.fake_sudo()
+        self.ready()
+        self.stop_kairo()
+        self.serve(start_unit="kairo")
+        self.fails(self.post("/api/start", {}), 401, "unauthorized")  # not logged in
+        self.login()
+        self.fails(self.post("/api/start", {}, csrf=False), 403, "forbidden")
+        self.fails(self.post("/api/start", {}, headers={"Origin": "http://evil.example"}),
+                   403, "forbidden")
+        self.assertFalse(log.exists())
+
+    def test_the_tab_icon_is_served_from_this_origin_like_every_other_asset(self):
+        self.ready()
+        icon = self.get("/static/favicon.svg")
+        self.assertEqual(icon.status, 200)
+        self.assertIn("image/svg+xml", icon.headers.get("Content-Type"))
+        self.assertIn("<svg", icon.text)
+        for page in ("index.html", "login.html"):
+            self.assertIn('href="/static/favicon.svg"', (STATIC / page).read_text(), page)
+        # Served before the login check, like the stylesheet, so the login page
+        # has it too; and from this origin, which is all the policy allows.
+        self.cookie = None
+        self.assertEqual(self.get("/static/favicon.svg").status, 200)
+        self.assertNotIn("data:", (STATIC / "index.html").read_text())
+
+    def test_the_page_offers_start_only_when_kairo_is_unreachable(self):
+        js = (STATIC / "app.js").read_text()
+        header = js[js.index("function renderHeader"):js.index("// -- monitors")]
+        self.assertIn('byId("start").hidden = !down || !canStart;', header)
+        self.assertIn('byId("wake").hidden = down;', header)
+        self.assertIn('byId("stop").hidden = down;', header)
 
 
 if __name__ == "__main__":

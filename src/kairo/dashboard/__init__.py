@@ -30,7 +30,9 @@ import json
 import logging
 import os
 import secrets
+import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -70,6 +72,13 @@ ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/api/wake"): "wake",
     ("POST", "/api/stop"): "stop",
 }
+# Not an IPC operation: the host is asked, because a stopped Kairo cannot be.
+START_PATH = "/api/start"
+START_TIMEOUT = 30.0  # seconds to wait for the service manager
+# A systemd unit name the dashboard may be configured with: a plain name, no
+# path, no shell metacharacter, so the fixed command cannot become another one.
+# Begins with a letter or digit, so it can never be read as an option.
+UNIT_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9:_.-]{0,95}\Z")
 # GET query fields, passed as integers.
 QUERY_INTS = {"chat": ("limit", "after"), "activity": ("limit", "before")}
 
@@ -78,11 +87,14 @@ HTTP_STATUS = {
     "malformed_request": 400, "invalid_params": 400, "rejected": 409, "unknown_op": 501,
     "persistence_error": 503, "response_too_large": 502, "internal_error": 502,
     "unreachable": 503, "permission_denied": 503, "timeout": 504, "bad_response": 502,
+    # Starting Kairo (the host, not Kairo): not allowed here, or the attempt failed.
+    "not_configured": 501, "start_failed": 502,
 }
 
 ASSETS = {
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/static/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/static/favicon.svg": ("favicon.svg", "image/svg+xml; charset=utf-8"),
 }
 SECURITY_HEADERS = {
     "Content-Security-Policy": ("default-src 'none'; script-src 'self'; style-src 'self'; "
@@ -96,6 +108,15 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "same-origin",
     "Cache-Control": "no-store",
 }
+
+
+def _service_unit(name: str) -> str:
+    """Validate the unit the dashboard may start. Rejected at startup, not at
+    request time: an operator's typo should stop the dashboard, not surprise
+    them later, and nothing a browser sends ever reaches this."""
+    if not UNIT_NAME.match(name):
+        raise ValueError(f"--start-unit {name!r} is not a plain systemd unit name")
+    return name
 
 
 def write_token(path: Path) -> str:
@@ -148,13 +169,17 @@ class Dashboard(ThreadingHTTPServer):
     request_queue_size = 32
 
     def __init__(self, address: tuple[str, int], socket_path: str | Path, token: str,
-                 allowed_hosts: list[str] | None = None, secure_cookie: bool = False) -> None:
+                 allowed_hosts: list[str] | None = None, secure_cookie: bool = False,
+                 start_unit: str | None = None) -> None:
         if not _loopback(address[0]):
             raise ValueError(f"refusing to listen on {address[0]!r}: the dashboard binds a "
                              "loopback address only (use an SSH tunnel or a TLS reverse proxy)")
         super().__init__(address, Handler)
         self.socket_path = str(socket_path)
         self.token = token
+        # The one service the dashboard may start, when the operator allowed it.
+        # Without it there is no way to start Kairo from the browser at all.
+        self.start_unit = _service_unit(start_unit) if start_unit else None
         self.sessions = Sessions()
         self.started_at = time.time()
         self.secure_cookie = secure_cookie
@@ -189,6 +214,38 @@ class Dashboard(ThreadingHTTPServer):
                     else "internal_error")
         return HTTP_STATUS.get(code, 502), {"ok": False, "error": str(response.get("error")),
                                             "code": code}
+
+    def start_kairo(self) -> tuple[int, dict[str, Any]]:
+        """Ask the service manager to start Kairo. Not an IPC operation: a
+        stopped Kairo has no socket, so this is the one thing the dashboard
+        asks of the host instead of of Kairo.
+
+        It runs exactly ``sudo -n systemctl start <unit>`` and nothing the
+        request can influence: the unit is fixed at startup, the browser sends
+        no arguments, and without the operator's sudo rule the command simply
+        fails. Starting an already-running service is what systemd calls a
+        no-op, so a double click cannot restart or disturb a working Kairo."""
+        if self.start_unit is None:
+            return _failure("not_configured",
+                            "this dashboard cannot start Kairo (no --start-unit); "
+                            "start it on the server with: systemctl start kairo")
+        argv = ["sudo", "-n", "systemctl", "start", self.start_unit]
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=START_TIMEOUT,
+                                  check=False, stdin=subprocess.DEVNULL)
+        except FileNotFoundError:
+            return _failure("start_failed", "sudo or systemctl is not installed")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return _failure("start_failed", f"could not start {self.start_unit} "
+                                            f"({type(exc).__name__})")
+        if done.returncode != 0:
+            detail = (done.stderr or done.stdout or "").strip().splitlines()
+            log.warning("starting %s failed (exit %s)", self.start_unit, done.returncode)
+            return _failure("start_failed",
+                            f"starting {self.start_unit} failed: "
+                            f"{detail[-1][:200] if detail else f'exit {done.returncode}'}")
+        log.info("started %s on the operator's request", self.start_unit)
+        return 200, {"ok": True, "result": {"started": self.start_unit}}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -239,7 +296,9 @@ class Handler(BaseHTTPRequestHandler):
                 "routes": sorted(f"{m} {p}" for m, p in ROUTES),
                 # Which release's dashboard this is: it keeps serving the release it
                 # started from, so after a deployment it can be older than Kairo.
-                "revision": own_revision(), "started_at": self.server.started_at}})
+                "revision": own_revision(), "started_at": self.server.started_at,
+                # Whether this dashboard was allowed to start Kairo (see start_kairo).
+                "can_start": self.server.start_unit is not None}})
         op = ROUTES.get(("GET", path))
         if op is None:
             return self._json(404, {"ok": False, "error": "not found", "code": "not_found"})
@@ -274,6 +333,8 @@ class Handler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(self.headers.get(CSRF_HEADER, ""), session_csrf):
             return self._json(403, {"ok": False, "error": "missing or wrong CSRF token",
                                     "code": "forbidden"})
+        if path == START_PATH:  # the host, not Kairo: see Dashboard.start_kairo
+            return self._json(*self.server.start_kairo())
         op = ROUTES.get(("POST", path))
         if op is None:
             return self._json(404, {"ok": False, "error": "not found", "code": "not_found"})
@@ -403,13 +464,18 @@ def main(argv: list[str] | None = None) -> int:
                              "reverse proxy); repeatable")
     parser.add_argument("--secure-cookie", action="store_true",
                         help="mark the session cookie Secure (when served over HTTPS)")
+    parser.add_argument("--start-unit", metavar="UNIT",
+                        help="the systemd unit this dashboard may start when Kairo is not "
+                             "reachable, e.g. kairo.service; needs a sudo rule allowing "
+                             "exactly 'systemctl start UNIT'. Without it the dashboard "
+                             "can never start Kairo")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     token_file = args.token_file or args.socket.parent / "dashboard.token"
     try:
         token = write_token(token_file)
         server = Dashboard((args.host, args.port), args.socket, token, args.allowed_host,
-                           args.secure_cookie)
+                           args.secure_cookie, args.start_unit)
     except (ValueError, OSError) as exc:
         print(f"kairo dashboard: {exc}", file=sys.stderr)
         return 2

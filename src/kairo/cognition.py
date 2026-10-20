@@ -106,11 +106,16 @@ class CognitionProvider(Protocol):
 
 class CognitionError(Exception):
     """A provider could not produce a usable decision. ``category`` is one of
-    OUTCOMES; anything else is treated as provider_error."""
+    OUTCOMES; anything else is treated as provider_error.
 
-    def __init__(self, category: str, message: str) -> None:
+    ``retry_at`` is a wall-clock time (epoch seconds) the provider itself named
+    as the earliest it is worth asking again — a usage limit's reset. It is the
+    provider's claim, not a promise, and only the pacing of retries uses it."""
+
+    def __init__(self, category: str, message: str, retry_at: float | None = None) -> None:
         super().__init__(message)
         self.category = category
+        self.retry_at = retry_at
 
 
 log = logging.getLogger("kairo.cognition")
@@ -169,6 +174,9 @@ class Attempt:
     fallback: bool        # whether this outcome let the next provider be tried
     seconds: float
     detail: str | None = None  # bounded, redacted failure message
+    # When the provider named a time it is worth asking again (a usage limit's
+    # reset): epoch seconds, as the provider reported it.
+    retry_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +189,13 @@ class CognitionResult:
     selection: dict[str, Any] | None     # {"position", "reason"} of that provider
     attempts: list[Attempt]
     failure: str | None = None           # outcome of the last attempt, if none decided
+
+    @property
+    def retry_at(self) -> float | None:
+        """The latest reset time any attempt named this cycle. Asking again
+        before the last one is known to be pointless."""
+        times = [a.retry_at for a in self.attempts if a.retry_at is not None]
+        return max(times) if times else None
 
     def summary(self) -> dict[str, Any]:
         """The provenance recorded with the cycle."""
@@ -247,7 +262,8 @@ class Cognition:
                     detail = repr(exc)
                 attempts.append(Attempt(provider.name, category, category in FALLBACK,
                                         round(time.monotonic() - started, 3),
-                                        redact(detail, limit=DETAIL_LIMIT)))
+                                        redact(detail, limit=DETAIL_LIMIT),
+                                        retry_at=getattr(exc, "retry_at", None)))
                 if category not in FALLBACK:
                     break
                 continue

@@ -150,8 +150,10 @@ class InstructionsTest(unittest.TestCase):
         # 7,712 before the cleanup; 7,765 after restoring what the situation no longer
         # explains (failure kinds aside, which the situation labels); then pacing, probes
         # and completion checks, which are new behaviour (9,009); then acting at the scale
-        # asked and honest reporting (9,968). Grow it deliberately.
-        self.assertLessEqual(len(INSTRUCTIONS), 9968)
+        # asked and honest reporting (9,968); then what a model call costs and the
+        # operator's daily budget (10,357), which pays for itself the first time Kairo
+        # does in one action what it would have spread over ten. Grow it deliberately.
+        self.assertLessEqual(len(INSTRUCTIONS), 10357)
 
 
 class UnboundImplementationsTest(ImplCase):

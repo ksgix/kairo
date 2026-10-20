@@ -44,6 +44,7 @@ import sys
 from pathlib import Path
 
 from kairo.cognition import Cognition
+from kairo.config import CONFIG_NAME, ConfigError, default_path, load
 from kairo.deploy import Deployment, PreflightCognition, init_release
 from kairo.environment import Environment, parse_probe
 from kairo.implementations import ID, Implementations
@@ -54,6 +55,8 @@ from kairo.runtime import Runtime
 from kairo.situation import build_situation
 
 DEFAULT_DB = Path(os.environ.get("KAIRO_DB", Path.home() / ".local/share/kairo/kairo.db"))
+DEFAULT_REASSESS = 300.0
+DEFAULT_COGNITION_TIMEOUT = 300.0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,13 +66,21 @@ def main(argv: list[str] | None = None) -> int:
                         help="operate continuously in the foreground until interrupted")
     parser.add_argument("--situation", action="store_true",
                         help="print the situation cognition would see now, then exit")
-    parser.add_argument("--reassess", type=float, default=300.0, metavar="SECONDS",
+    parser.add_argument("--reassess", type=float, default=None, metavar="SECONDS",
                         help="with --run: how long to sleep before waking to reassess "
-                             "(0 = sleep until woken; default: %(default)s)")
+                             f"(0 = sleep until woken; default: {DEFAULT_REASSESS})")
+    parser.add_argument("--config", type=Path, metavar="PATH",
+                        help="configuration file for the settings below "
+                             f"(default: {CONFIG_NAME} beside --db, if it exists); a flag given "
+                             "here wins over the file")
+    parser.add_argument("--calls-per-day", type=int, default=None, metavar="N",
+                        help="at most N cycles per UTC day may ask a cognition provider; beyond "
+                             "it the runtime sleeps until the day turns (0 = no budget, the "
+                             "default)")
     parser.add_argument("--socket", type=Path, default=DEFAULT_SOCKET,
                         help="with --run: Unix socket for local IPC "
                              "(default: $KAIRO_SOCKET or %(default)s)")
-    parser.add_argument("--cognition", default="none", metavar="ORDER",
+    parser.add_argument("--cognition", default=None, metavar="ORDER",
                         help="cognition providers in the order they are asked, comma-separated "
                              "(later ones only on technical failure of earlier ones), e.g. "
                              f"claude or claude,claude@haiku; known: {', '.join(sorted(PROVIDERS))} "
@@ -91,9 +102,9 @@ def main(argv: list[str] | None = None) -> int:
                              "is active does not consult cognition")
     parser.add_argument("--model", help="shortcut: model for every claude provider "
                                         "(default: the Claude CLI's default)")
-    parser.add_argument("--cognition-timeout", type=float, default=300.0, metavar="SECONDS",
+    parser.add_argument("--cognition-timeout", type=float, default=None, metavar="SECONDS",
                         help="shortcut: max seconds per decision for every claude provider "
-                             "(default: %(default)s)")
+                             f"(default: {DEFAULT_COGNITION_TIMEOUT})")
     parser.add_argument("--repository", type=Path, metavar="PATH",
                         help="development repository Kairo's own code is committed in "
                              "(with --releases: enables runtime.deploy)")
@@ -114,10 +125,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.repository is None:
             parser.error("--init-release needs --repository and --releases")
         return init_release(args.repository, args.releases, args.init_release)
+    try:  # the file fills in what the flags did not say; a flag always wins
+        _apply_config(args)
+    except ConfigError as exc:
+        parser.error(str(exc))
     if args.reassess < 0:
         parser.error("--reassess must be >= 0")
     if args.cognition_timeout <= 0:
         parser.error("--cognition-timeout must be > 0")
+    if args.calls_per_day < 0:
+        parser.error("--calls-per-day must be >= 0 (0: no budget)")
 
     claude_defaults = {"timeout": str(args.cognition_timeout)}
     if args.model:
@@ -164,21 +181,25 @@ def main(argv: list[str] | None = None) -> int:
             return _preflight(memory, environment)
         if args.situation:  # no runtime is running: a preview, then release the lock
             runtime = Runtime(memory, environment, cognition=cognition,
-                              reassess_after=args.reassess or None)
+                              reassess_after=args.reassess or None,
+                              calls_per_day=args.calls_per_day)
             print(json.dumps(build_situation(runtime.context()), indent=1, ensure_ascii=False))
             os.close(lock)
             return 0
         if args.run:
-            return _run(memory, args.socket, args.reassess or None, cognition, environment)
+            return _run(memory, args.socket, args.reassess or None, cognition,
+                        environment, args.calls_per_day)
         return _once(memory, args.db, cognition, environment)
     finally:
         memory.close()
 
 
 def _run(memory: Memory, socket_path: Path, reassess_after: float | None,
-         cognition: Cognition | None, environment: Environment) -> int:
+         cognition: Cognition | None, environment: Environment,
+         calls_per_day: int | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    runtime = Runtime(memory, environment, cognition=cognition, reassess_after=reassess_after)
+    runtime = Runtime(memory, environment, cognition=cognition, reassess_after=reassess_after,
+                      calls_per_day=calls_per_day)
     server = IPCServer(runtime, socket_path)
     try:
         server.start()
@@ -235,9 +256,36 @@ def _preflight(memory: Memory, environment: Environment) -> int:
     return 0 if result == "decided" else 1
 
 
+def _apply_config(args: argparse.Namespace) -> None:
+    """Resolve each setting the configuration file can supply, in order:
+    the command line, then the file, then Kairo's default. Mutates ``args`` so
+    everything downstream — including the dry cycle's argv — sees one effective
+    configuration and never reads the file again."""
+    path = args.config or default_path(args.db)
+    config = load(path, required=args.config is not None)
+    for flag, configured, fallback in (
+        ("cognition", config.providers, "none"),
+        ("model", config.model, None),
+        ("cognition_timeout", config.timeout, DEFAULT_COGNITION_TIMEOUT),
+        ("reassess", config.reassess, DEFAULT_REASSESS),
+        ("calls_per_day", config.calls_per_day, 0),
+    ):
+        if getattr(args, flag) is None:
+            setattr(args, flag, configured if configured is not None else fallback)
+    # Options the command line already gives for the same instance.key win; the
+    # rest of the file's options are added, because giving both is an error.
+    given = {item.split("=", 1)[0] for item in args.provider_opt}
+    args.provider_opt = [item for item in config.provider_opts()
+                         if item.split("=", 1)[0] not in given] + args.provider_opt
+
+
 def _preflight_args(args: argparse.Namespace, implementations_dir: Path) -> list[str]:
     """This runtime's configuration, for a candidate's dry cycle: the same
-    providers (built and validated, never called) and implementations."""
+    providers (built and validated, never called) and implementations.
+
+    Only settings that differ from the default are passed. The candidate may be
+    an older release than this one — a rollback is a deployment like any other —
+    and a flag it has never heard of would fail its dry cycle for no reason."""
     out = ["--cognition", args.cognition, "--implementations", args.implementations,
            "--implementations-dir", str(Path(implementations_dir).resolve()),
            "--cognition-timeout", str(args.cognition_timeout)]
@@ -247,6 +295,8 @@ def _preflight_args(args: argparse.Namespace, implementations_dir: Path) -> list
         out += ["--probe", probe]
     if args.model:
         out += ["--model", args.model]
+    # Not the call budget: a dry cycle calls no provider, so it spends nothing,
+    # and a spent budget must never be the reason a release cannot be checked.
     return out
 
 
