@@ -1,3 +1,5 @@
+# Project has been temporarily suspended. Maybe someday I will find the time to work on it, and something worthwhile will come of the project. But not today :\
+
 # Kairo
 
 Kairo is a **persistent autonomous runtime**: a long-lived environment on a Linux
